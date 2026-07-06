@@ -1,0 +1,52 @@
+#!/bin/zsh
+# Bring the tmux world up, restored, and settled — then print the real session
+# list, one per line. The single "server is ready" primitive, called from two
+# places at login, and safe when they overlap:
+#   1. the LaunchAgent (macos/dev.dotfiles.tmux-boot.plist), so sessions are
+#      restored even if WezTerm is never opened, and
+#   2. WezTerm's gui-startup hook (wezterm.lua), which builds one tab per line
+#      of our output.
+# Starting the server sources ~/.tmux.conf → tpm → tmux-continuum, whose
+# @continuum-restore rebuilds the last snapshot in the background. This replaces
+# continuum's own macOS @continuum-boot, which pops open Apple Terminal.app.
+#
+# launchd runs with a minimal PATH, so the tmux path is absolute. NB: the
+# variable is `tmux_bin`, not `TMUX` — `TMUX` is tmux's own special env var
+# (socket,pid,session) and shadowing it would break every tmux child when this
+# script is ever run from inside a tmux pane.
+tmux_bin=/opt/homebrew/bin/tmux
+export PATH="/opt/homebrew/bin:$PATH"
+
+# Real sessions = everything except the throwaway bootstrap. `-n "$(grep -vx)"`
+# rather than `grep -qvx`: BSD grep (what launchd's non-interactive shell gets)
+# handles `-qv` fine, but ugrep — which is `grep` in an interactive shell here —
+# returns the wrong exit status for `-q` + `-v`. This form is correct under both.
+others() { "$tmux_bin" list-sessions -F '#S' 2>/dev/null | grep -vx _boot }
+
+# Ensure a server exists so continuum's restore fires. Concurrency-safe: if one
+# is already up (the LaunchAgent and gui-startup can land here at the same
+# instant), don't disturb it — just fall through to the settle-wait below. A
+# failing `list-sessions` means "no server yet". If two callers race here, one
+# wins new-session and the other's duplicate simply errors out (harmless).
+"$tmux_bin" list-sessions >/dev/null 2>&1 || "$tmux_bin" new-session -d -s _boot 2>/dev/null
+
+# Wait (bounded) for continuum's background restore to populate real sessions.
+# This runs even when the server already existed, so a caller that arrives
+# mid-restore still blocks until the session set has settled instead of reading
+# a half-restored server. Breaks out the instant sessions appear, so the full
+# wait is only ever paid when there is genuinely nothing to restore.
+for _ in {1..40}; do
+  [ -n "$(others)" ] && break
+  sleep 0.2
+done
+
+# Drop the bootstrap once real sessions exist so it never becomes a stray empty
+# tab. If restore produced nothing (first-ever boot, no snapshot), keep _boot so
+# a usable server is still left behind.
+if [ -n "$(others)" ]; then
+  "$tmux_bin" kill-session -t _boot 2>/dev/null
+fi
+
+# Emit the settled real-session list for gui-startup to build tabs from. (The
+# LaunchAgent ignores stdout.)
+others

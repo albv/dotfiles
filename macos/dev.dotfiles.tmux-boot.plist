@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Headless tmux restore at login. Runs bin/tmux-boot, which starts the
+       tmux server so tmux-continuum's @continuum-restore rebuilds the saved
+       sessions; WezTerm's gui-startup then opens a tab per session. Replaces
+       continuum's own macOS boot agent (which opens Apple Terminal.app). -->
+  <key>Label</key>
+  <string>dev.dotfiles.tmux-boot</string>
+  <!-- __TMUX_BOOT__ is rendered to the absolute bin/tmux-boot path by
+       install.sh (launchd does not expand ~ or $HOME). -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__TMUX_BOOT__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/tmp/tmux-boot.err.log</string>
+</dict>
+</plist>

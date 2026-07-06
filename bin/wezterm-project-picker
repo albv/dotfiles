@@ -1,0 +1,157 @@
+#!/bin/zsh
+# New WezTerm tab entrypoint: pick a project, attach its tmux session.
+# One tab = one project = one tmux session (persists after tab closes).
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+
+# Where projects live — override with WORKSPACE_DIR or edit here per machine
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/Workspace}"
+STORE="$WORKSPACE_DIR/.worktrees"
+
+# Never let fzf block without a terminal (non-interactive invocation)
+[ -t 0 ] || exec zsh
+command -v fzf >/dev/null 2>&1 || exec tmux new-session -A -s main
+
+sessions=$(tmux list-sessions -F '#S' 2>/dev/null)
+# -exec basename (not xargs): directory names with spaces must stay one entry
+projects=$(find "$WORKSPACE_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.worktrees' -exec basename {} \; 2>/dev/null)
+
+# Worktrees whose session died (reboot, closed tab): revivable orphans.
+# Live worktree sessions already appear in the ● section above.
+worktrees=$(find "$STORE" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | while IFS= read -r d; do
+  repo=$(basename "$(dirname "$d")")
+  wt=$(basename "$d")
+  name="$(printf '%s' "$repo" | tr '.:' '__')--$wt"
+  printf '%s\n' "$sessions" | grep -qxF "$name" || printf '%s/%s\n' "$repo" "$wt"
+done)
+
+# Existing sessions first (marked ●), then project dirs without a session
+# yet, then orphaned worktrees (marked ⌥). ctrl-o (not ctrl-w: that's fzf's
+# default delete-word, and --expect would steal it from query typing).
+out=$(
+  {
+    [ -n "$sessions" ] && printf '%s\n' "$sessions" | sed 's/^/● /'
+    [ -n "$projects" ] && printf '%s\n' "$projects" | while IFS= read -r p; do
+      printf '%s\n' "$sessions" | grep -qxF "$(printf '%s' "$p" | tr '.:' '__')" || printf '%s\n' "$p"
+    done
+    [ -n "$worktrees" ] && printf '%s\n' "$worktrees" | sed 's/^/⌥ /'
+  } | fzf --prompt='project ▸ ' --height=100% --reverse \
+        --expect=ctrl-o,ctrl-x \
+        --header='enter attach · ctrl-o new worktree · ctrl-x remove worktree · Esc shell'
+)
+
+# --expect output is "key\nselection". An expect-key pressed with a
+# non-matching query emits only the key line — no selection, nothing to do.
+key=${out%%$'\n'*}
+choice=${out#*$'\n'}
+[[ $out == *$'\n'* ]] || choice=""
+[ -z "$choice" ] && exec zsh
+
+# Deterministic WezTerm tab title (immune to OSC title races)
+settitle() {
+  PATH="$PATH:/Applications/WezTerm.app/Contents/MacOS" \
+    wezterm cli set-tab-title "$1" 2>/dev/null
+}
+
+# Show a wt error (already printed on stderr), wait, re-show the picker —
+# friendlier than dumping into a bare shell. SELF, not $0: inside a zsh
+# function $0 is the function name, and exec'ing that recurses forever.
+SELF=$0
+again() {
+  printf 'press any key\n'
+  read -k1 -s
+  exec "$SELF"
+}
+
+# Session names are munged (. : -> _); find the real project directory by
+# comparing munged basenames — the same rule the dedupe loop above uses
+resolve_project() {
+  [ -d "$WORKSPACE_DIR/$1" ] && { printf '%s' "$1"; return 0 }
+  local p
+  for p in "$WORKSPACE_DIR"/*(/N); do
+    if [ "$(printf '%s' "${p:t}" | tr '.:' '__')" = "$1" ]; then
+      printf '%s' "${p:t}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Strip the ●/⌥ markers the picker itself added. (A directory literally
+# named like "● foo" is listed unmarked yet still matches the marked
+# patterns below and gets misrouted — accepted; don't name dirs that.)
+entry=$choice
+case "$entry" in
+  "● "*) entry=${entry#● } ;;
+  "⌥ "*) entry=${entry#⌥ } ;;
+esac
+
+case "$key" in
+  ctrl-o)
+    # target repo: orphan entries are repo/slug, worktree sessions are
+    # repo--slug (resolve via the store), anything else is a project name
+    proj=''
+    case "$entry" in
+      */*) proj=$(resolve_project "${entry%%/*}") ;;
+      *)
+        proj=$(resolve_project "$entry")
+        if [ -z "$proj" ] && [[ "$entry" == *--* ]]; then
+          for d in "$STORE"/*/*(/N); do
+            if [ "$(printf '%s' "${d:h:t}" | tr '.:' '__')--${d:t}" = "$entry" ]; then
+              proj=$(resolve_project "${d:h:t}")
+              break
+            fi
+          done
+        fi
+        ;;
+    esac
+    [ -n "$proj" ] || { printf 'no project directory for "%s"\n' "$entry"; again }
+    printf 'branch for %s ▸ ' "$proj"
+    read -r branch
+    [ -z "$branch" ] && exec "$0"
+    if name=$(wt new --no-attach --repo "$WORKSPACE_DIR/$proj" "$branch"); then
+      settitle "$name"
+      exec tmux attach -t "=$name"
+    fi
+    again
+    ;;
+  ctrl-x)
+    # wt resolves repo/slug and repo--slug forms itself and politely
+    # refuses anything that isn't a managed worktree
+    wt done "$entry"
+    again
+    ;;
+esac
+
+# Enter — attach-or-create
+case "$choice" in
+  "● "*)
+    settitle "$entry"
+    exec tmux new-session -A -s "$entry"
+    ;;
+  "⌥ "*)
+    if name=$(wt open --no-attach "${entry%%/*}" "${entry#*/}"); then
+      settitle "$name"
+      exec tmux attach -t "=$name"
+    fi
+    again
+    ;;
+esac
+
+name=$(printf '%s' "$choice" | tr '.:' '__')
+dir="$WORKSPACE_DIR/$choice"
+[ -d "$dir" ] || dir="$HOME"
+
+# First creation gets the dev layout; reattach never re-applies it.
+# A project can override with an executable .session-setup script, which
+# runs inside the session's first pane (plain tmux commands work there).
+if ! tmux has-session -t "=$name" 2>/dev/null; then
+  tmux new-session -d -s "$name" -c "$dir"
+  if [ -x "$dir/.session-setup" ]; then
+    tmux send-keys -t "=$name:" "'$dir/.session-setup'" Enter
+  else
+    tmux split-window -h -l 30% -t "=$name:" -c "$dir"
+    tmux select-pane -t "=$name:.1"
+  fi
+fi
+settitle "$name"
+exec tmux attach -t "=$name"

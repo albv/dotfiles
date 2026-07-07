@@ -74,6 +74,29 @@ config.mouse_bindings = {
   },
 }
 
+-- Cmd+V: smart paste. Images can't ride a text paste through the tty, so a
+-- terminal app (Claude Code) reads the clipboard itself on Ctrl+V. Peek at the
+-- clipboard: if it holds an image (a screenshot etc.), send a raw Ctrl+V (0x16)
+-- so the focused app grabs it; otherwise do a normal text paste. `osascript` is
+-- the dependency-free clipboard probe — a few ms per paste, macOS-only.
+-- (Edge: an image on the clipboard + a plain shell means Cmd+V inserts a literal
+-- ^V rather than pasting — rare, and you rarely paste an image into a shell.)
+config.keys = {
+  {
+    key = 'v',
+    mods = 'CMD',
+    action = wezterm.action_callback(function(window, pane)
+      local pok, ran, out = pcall(wezterm.run_child_process,
+        { '/usr/bin/osascript', '-e', 'clipboard info' })
+      if pok and ran and out and (out:find 'PNGf' or out:find 'TIFF') then
+        window:perform_action(wezterm.action.SendString '\x16', pane)
+      else
+        window:perform_action(wezterm.action.PasteFrom 'Clipboard', pane)
+      end
+    end),
+  },
+}
+
 -- One tab = one project = one tmux session.
 -- New tabs open a project picker that attaches/creates the right session.
 config.default_prog = { wezterm.home_dir .. '/.local/bin/wezterm-project-picker' }

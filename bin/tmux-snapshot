@@ -1,0 +1,62 @@
+#!/bin/zsh
+# The single writer for resurrect snapshots. Fired by tmux hooks
+# (session-created / session-closed / client-detached) via run-shell -b, so it
+# always runs in the server's own environment — one context, one lock path.
+# Debounces hook storms (a boot-time restore or a `wt gc` sweep fires many
+# hooks within seconds) into one save, and serializes saves so two can never
+# interleave or share resurrect's second-resolution snapshot filename.
+# Continuum's timer is disabled (@continuum-save-interval 0): with every
+# structural change saving through here, a timer adds nothing but races.
+export PATH="/opt/homebrew/bin:$PATH"
+
+save="$HOME/.tmux/plugins/tmux-resurrect/scripts/save.sh"
+state="$HOME/.local/state/tmux-snapshot"
+resdir="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
+[ -x "$save" ] || exit 0
+mkdir -p "$state"
+
+# Mark work pending, then try to become the saver. Losing the race is fine:
+# the current holder's dirty-loop below picks the mark up. (Residual window:
+# a mark set between the holder's final dirty-check and its exit waits for
+# the next hook event — client-detached fires often enough to heal it.)
+: > "$state/dirty"
+
+# Kernel lock, not a hand-rolled pidfile: flock is atomic and the kernel
+# releases it when the holder dies — any way it dies, SIGKILL included — so
+# stale locks and lock-stealing races cannot exist by construction.
+zmodload zsh/system 2>/dev/null || exit 0
+: >> "$state/lock"
+zsystem flock -t 0 "$state/lock" 2>/dev/null || exit 0   # live holder exists
+
+# A save only counts if the server was alive on both sides of it. If the
+# server dies mid-save, the orphaned save.sh writes an EMPTY snapshot and
+# repoints `last` at it — silently wiping the next boot's restore. Remember
+# the good target and put it back if that happened; the signal handler does
+# the same for the SIGTERM-at-shutdown path (zsh delivers the trap after the
+# foreground save.sh returns).
+prev=''
+distrust_dead_save() {
+  if ! tmux list-sessions >/dev/null 2>&1 && [ -n "$prev" ] &&
+     [ "$(readlink "$resdir/last" 2>/dev/null)" != "$prev" ] &&
+     ! grep -q '^pane' "$resdir/last" 2>/dev/null; then
+    ln -sfn "$prev" "$resdir/last" 2>/dev/null
+  fi
+}
+trap 'distrust_dead_save; exit 143' TERM INT HUP
+
+# Save once the hooks go quiet for 3s — but never postpone forever: under
+# sustained fire (events < 3s apart) the deadline forces a save every ~30s.
+rounds=0
+while [ -e "$state/dirty" ]; do
+  rm -f "$state/dirty"
+  sleep 3
+  if [ -e "$state/dirty" ] && [ $(( ++rounds )) -lt 10 ]; then
+    continue                          # storm in progress — keep debouncing
+  fi
+  rounds=0
+  prev=$(readlink "$resdir/last" 2>/dev/null)
+  tmux list-sessions >/dev/null 2>&1 || break   # server gone: nothing to save
+  "$save" quiet >/dev/null 2>&1
+  distrust_dead_save
+done
+exit 0

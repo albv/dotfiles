@@ -9,11 +9,19 @@ STORE="$WORKSPACE_DIR/.worktrees"
 
 # Never let fzf block without a terminal (non-interactive invocation)
 [ -t 0 ] || exec zsh
+
+# Server down (first run, or it died mid-day): bring it up through tmux-boot
+# so continuum's restore completes before we read or create sessions — a bare
+# new-session below would race the restore
+tmux list-sessions >/dev/null 2>&1 || tmux-boot >/dev/null 2>&1
+
 command -v fzf >/dev/null 2>&1 || exec tmux new-session -A -s main
 
-sessions=$(tmux list-sessions -F '#S' 2>/dev/null)
-# -exec basename (not xargs): directory names with spaces must stay one entry
-projects=$(find "$WORKSPACE_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.worktrees' -exec basename {} \; 2>/dev/null)
+# _boot is tmux-boot's throwaway bootstrap, not a project — never list it
+sessions=$(tmux list-sessions -F '#S' 2>/dev/null | grep -vx _boot)
+# -exec basename (not xargs): directory names with spaces must stay one entry.
+# -L: projects symlinked into the workspace root count too
+projects=$(find -L "$WORKSPACE_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.worktrees' -exec basename {} \; 2>/dev/null)
 
 # Worktrees whose session died (reboot, closed tab): revivable orphans.
 # Live worktree sessions already appear in the ● section above.
@@ -63,11 +71,12 @@ again() {
 }
 
 # Session names are munged (. : -> _); find the real project directory by
-# comparing munged basenames — the same rule the dedupe loop above uses
+# comparing munged basenames — the same rule the dedupe loop above uses.
+# (-/N): match symlinked project dirs too, same as the find -L above
 resolve_project() {
   [ -d "$WORKSPACE_DIR/$1" ] && { printf '%s' "$1"; return 0 }
   local p
-  for p in "$WORKSPACE_DIR"/*(/N); do
+  for p in "$WORKSPACE_DIR"/*(-/N); do
     if [ "$(printf '%s' "${p:t}" | tr '.:' '__')" = "$1" ]; then
       printf '%s' "${p:t}"
       return 0
@@ -146,8 +155,11 @@ dir="$WORKSPACE_DIR/$choice"
 # runs inside the session's first pane (plain tmux commands work there).
 if ! tmux has-session -t "=$name" 2>/dev/null; then
   tmux new-session -d -s "$name" -c "$dir"
+  # (qq): single-quote — send-keys types this into the pane's interactive
+  # shell, where a bare ' would hang at a continuation prompt and a bare !
+  # trips history expansion ((q) leaves ! unescaped)
   if [ -x "$dir/.session-setup" ]; then
-    tmux send-keys -t "=$name:" "'$dir/.session-setup'" Enter
+    tmux send-keys -t "=$name:" "${(qq)dir}/.session-setup" Enter
   else
     tmux split-window -h -l 30% -t "=$name:" -c "$dir"
     tmux select-pane -t "=$name:.1"

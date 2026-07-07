@@ -30,22 +30,102 @@ others() { "$tmux_bin" list-sessions -F '#S' 2>/dev/null | grep -vx _boot }
 # wins new-session and the other's duplicate simply errors out (harmless).
 "$tmux_bin" list-sessions >/dev/null 2>&1 || "$tmux_bin" new-session -d -s _boot 2>/dev/null
 
-# Wait (bounded) for continuum's background restore to populate real sessions.
-# This runs even when the server already existed, so a caller that arrives
-# mid-restore still blocks until the session set has settled instead of reading
-# a half-restored server. Breaks out the instant sessions appear, so the full
-# wait is only ever paid when there is genuinely nothing to restore.
-for _ in {1..40}; do
-  [ -n "$(others)" ] && break
-  sleep 0.2
-done
-
-# Drop the bootstrap once real sessions exist so it never becomes a stray empty
-# tab. If restore produced nothing (first-ever boot, no snapshot), keep _boot so
-# a usable server is still left behind.
-if [ -n "$(others)" ]; then
-  "$tmux_bin" kill-session -t _boot 2>/dev/null
+# Wait (bounded) for continuum's background restore to finish, by watching for
+# the sessions the snapshot says should exist (field 2 of its pane lines).
+# Fast path: the moment every expected session is live we are settled — zero
+# extra delay when the server was already up. Fallback: if some never appear
+# (a snapshot listing a session killed without a save since), settle once the
+# list is non-empty and unchanged across 5 polls. No snapshot, or one with no
+# real sessions, means nothing will be restored — skip the wait entirely.
+# Snapshot location mirrors resurrect's own resolution: legacy dir, then XDG.
+snapshot_file() {
+  local d
+  for d in "$HOME/.tmux/resurrect" "${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"; do
+    [ -f "$d/last" ] && { print -r -- "$d/last"; return 0 }
+  done
+  return 1
+}
+want=''
+f=$(snapshot_file) && want=$(awk -F'\t' '$1=="pane" && $2!="_boot" {print $2}' "$f" | sort -u)
+# $1 = current session list; true when every wanted session is in it. Pure
+# zsh line matching: BSD awk can't take multi-line -v strings, and session
+# names may contain spaces, so no field splitting either.
+settled() {
+  local w
+  for w in ${(f)want}; do
+    [[ $'\n'"$1"$'\n' == *$'\n'"$w"$'\n'* ]] || return 1
+  done
+  return 0
+}
+# Continuum's restore fires exclusively at server start, so a server that has
+# been up for a while finished restoring long ago — waiting would only stall
+# (worst on an alive-but-empty server, where the fallback can never trigger).
+# start_time is a server-level format; if it can't be read (no session to
+# anchor display-message on), treat the server as old and skip the wait.
+srv_start=$("$tmux_bin" display -p '#{start_time}' 2>/dev/null)
+[ -n "$srv_start" ] || srv_start=0
+age=$(( $(date +%s) - srv_start ))
+if [ -n "$want" ] && [ "$age" -lt 60 ]; then
+  prev='' stable=0
+  for _ in {1..75}; do
+    cur=$(others)
+    settled "$cur" && break
+    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then
+      stable=$((stable + 1))
+      [ "$stable" -ge 5 ] && break
+    else
+      stable=0
+      prev=$cur
+    fi
+    sleep 0.2
+  done
 fi
+
+# Reconcile before building tabs: a restored worktree session whose store
+# directory no longer exists (removed by wt done/gc — a snapshot can outlive
+# the teardown it missed) is a zombie pointing nowhere. Kill it so it neither
+# gets a tab nor re-enters the next snapshot; the session-closed hook then
+# persists the correction. Fail-safe by construction: reaping requires the
+# store to EXIST (a missing/diverged store means we cannot judge — skip) AND
+# the session's repo part to match a store repo we actually manage (so a
+# non-wt session that merely contains '--' is never touched) AND no project
+# directory to claim the name. Store path/munge rules mirror bin/wt.
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/Workspace}"
+STORE="$WORKSPACE_DIR/.worktrees"
+if [ -d "$STORE" ]; then
+  "$tmux_bin" list-sessions -F '#S' 2>/dev/null | grep -vx _boot | while IFS= read -r s; do
+    case "$s" in
+      *--*)
+        ok=''
+        for d in "$STORE"/*/*(/N); do
+          [ "$(print -r -- "${d:h:t}" | tr '.:' '__')--${d:t}" = "$s" ] && { ok=1; break }
+        done
+        # a project directory whose name contains '--' is legitimate too
+        # ((-/N): symlinked projects count, matching the picker's find -L)
+        if [ -z "$ok" ]; then
+          for d in "$WORKSPACE_DIR"/*(-/N); do
+            [ "$(print -r -- "${d:t}" | tr '.:' '__')" = "$s" ] && { ok=1; break }
+          done
+        fi
+        # only reap inside a known repo's namespace: <munged-repo>--…
+        zombie=''
+        if [ -z "$ok" ]; then
+          for d in "$STORE"/*(/N); do
+            case "$s" in
+              "$(print -r -- "${d:t}" | tr '.:' '__')--"*) zombie=1; break ;;
+            esac
+          done
+        fi
+        [ -n "$zombie" ] && "$tmux_bin" kill-session -t "=$s" 2>/dev/null
+        ;;
+    esac
+  done
+fi
+
+# Drop the bootstrap unconditionally: with exit-empty off the server survives
+# at zero sessions, so _boot is pure scaffolding — keeping it around only
+# pollutes snapshots and session lists.
+"$tmux_bin" kill-session -t _boot 2>/dev/null
 
 # Emit the settled real-session list for gui-startup to build tabs from. (The
 # LaunchAgent ignores stdout.)

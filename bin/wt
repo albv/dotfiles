@@ -42,6 +42,12 @@ settitle() { wezterm cli set-tab-title "$1" 2>/dev/null }
 # Unset, the cli auto-discovers the running GUI's socket.
 wz() { env -u WEZTERM_UNIX_SOCKET -u WEZTERM_PANE wezterm "$@" }
 
+# Snapshot refresh is NOT wt's job: tmux's session-created/session-closed
+# hooks (tmux.conf) fire on every new-session/kill-session below and funnel
+# into bin/tmux-snapshot, the single debounced writer. The hooks run on the
+# server, which outlives its last session (exit-empty off), so a `wt done`
+# of the final task still gets its save — no detached watchers needed here.
+
 # Open the session as a new WezTerm tab, aimed at the focused window (the
 # baked-in WEZTERM_PANE can't be trusted for "current"). Absolute tmux path
 # is required: the spawn execs in the GUI mux server's environment, whose
@@ -66,11 +72,21 @@ spawn_tab() {
 ensure_session() {
   local session=$1 dir=$2 repo=$3 branch=$4 base=$5
   tmux has-session -t "=$session" 2>/dev/null && return 0
+  # No server yet (bare terminal, or it died mid-day): boot through tmux-boot
+  # so continuum's restore lands before we create anything — the restored set
+  # may even include this very session.
+  if ! tmux list-sessions >/dev/null 2>&1; then
+    tmux-boot >/dev/null 2>&1
+    tmux has-session -t "=$session" 2>/dev/null && return 0
+  fi
   tmux new-session -d -s "$session" -c "$dir" \
     -e "WT_REPO=$repo" -e "WT_BRANCH=$branch" \
     -e "WT_BASE_BRANCH=$base" -e "WT_WORKTREE_PATH=$dir" || return 1
+  # (qq): single-quote the path — send-keys types this line into the pane's
+  # interactive shell, where a bare ' would hang at a continuation prompt and
+  # a bare ! trips history expansion ((q) leaves ! unescaped)
   if [ -x "$dir/.session-setup" ]; then
-    tmux send-keys -t "=$session:" "'$dir/.session-setup'" Enter
+    tmux send-keys -t "=$session:" "${(qq)dir}/.session-setup" Enter
   else
     tmux split-window -h -l 30% -t "=$session:" -c "$dir"
     tmux select-pane -t "=$session:.1"

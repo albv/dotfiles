@@ -25,7 +25,7 @@ reboots.
 - **Worktrees as sessions.** `wt new <branch>` creates a git worktree, a branch,
   and a tmux session in one step, isolated from your main checkout. `wt gc`
   later sweeps the ones whose work has already merged.
-- **Survives reboot.** Sessions are snapshotted continuously; at login they're
+- **Survives reboot.** Sessions are snapshotted on every change; at login they're
   restored headlessly and WezTerm reopens one tab per session — panes, layouts,
   scrollback, and coding agents included.
 - **Silent notifications.** When a long command (or a coding agent) finishes,
@@ -163,8 +163,8 @@ off. Swap the command for any other agent, or drop it for a plain dev layout.
 
 | | |
 |---|---|
-| **Autosave** | tmux-continuum snapshots every 15 min in the background |
-| **At login** | a launchd agent runs `bin/tmux-boot`, which starts tmux headlessly; continuum restores your sessions, and WezTerm reopens a tab per session |
+| **Autosave** | event-driven: every session create/close and tab detach triggers a debounced snapshot via `bin/tmux-snapshot` (a single serialized writer; continuum's timer is off) |
+| **At login** | a launchd agent runs `bin/tmux-boot`, which starts tmux headlessly; continuum restores your sessions, stale worktree sessions are reconciled away, and WezTerm reopens a tab per session |
 | **Agents** | resurrect replays each allowlisted pane's command verbatim — a pane started with `claude -c` comes back continuing. Add agents to `@resurrect-processes` in `tmux/tmux.conf`, e.g. `'"~claude" "~aider"'` |
 | **Manual** | `Ctrl-a Ctrl-s` save · `Ctrl-a Ctrl-r` restore |
 
@@ -190,6 +190,7 @@ off. Swap the command for any other agent, or drop it for a plain dev layout.
 | `bin/wezterm-project-picker` | `~/.local/bin/wezterm-project-picker` | fzf new-tab menu: attach/create sessions & worktrees |
 | `bin/wt` | `~/.local/bin/wt` | worktree workflow CLI (`new/open/done/gc/ls`) |
 | `bin/tmux-boot` | `~/.local/bin/tmux-boot` | headless tmux restore at login (run by the launchd agent) |
+| `bin/tmux-snapshot` | `~/.local/bin/tmux-snapshot` | debounced single-writer resurrect save (fired by tmux hooks on session create/close, tab detach) |
 | `claude/statusline.sh` | `~/.claude/statusline.sh` | Claude Code status line (opt-in: point Claude's `statusLine` setting at it) |
 | `macos/dev.dotfiles.tmux-boot.plist` | `~/Library/LaunchAgents/…` | login agent (rendered + loaded by `install.sh`) |
 | `install.sh` | — | symlinks everything + installs the login agent; idempotent |
@@ -207,4 +208,6 @@ off. Swap the command for any other agent, or drop it for a plain dev layout.
   (default `~/Workspace`) — clone your project repos there.
 - **Sessions don't come back after a reboot?** Make sure the plugins installed
   (re-run `install.sh`, or `Ctrl-a I` inside tmux) and that a session was saved
-  at least once (autosave runs every 15 min, or force it with `Ctrl-a Ctrl-s`).
+  at least once — saves fire automatically on session create/close and tab
+  detach (force one with `Ctrl-a Ctrl-s`; snapshots live in
+  `~/.local/share/tmux/resurrect`).

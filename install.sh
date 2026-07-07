@@ -20,10 +20,12 @@ link claude/statusline.sh       "$HOME/.claude/statusline.sh"
 link bin/wezterm-project-picker "$HOME/.local/bin/wezterm-project-picker"
 link bin/wt                     "$HOME/.local/bin/wt"
 link bin/tmux-boot              "$HOME/.local/bin/tmux-boot"
+link bin/tmux-snapshot          "$HOME/.local/bin/tmux-snapshot"
 
 # these are invoked by path — don't rely on git preserving the exec bit
 chmod +x "$DIR/bin/wezterm-project-picker" "$DIR/bin/wt" \
-         "$DIR/bin/tmux-boot" "$DIR/claude/statusline.sh"
+         "$DIR/bin/tmux-boot" "$DIR/bin/tmux-snapshot" \
+         "$DIR/claude/statusline.sh"
 
 # tmux plugins: tpm + everything declared via `set -g @plugin` in tmux.conf.
 # Cloning each into ~/.tmux/plugins/<name> is exactly what tpm's `prefix + I`
@@ -54,7 +56,19 @@ if [ "$(uname)" = "Darwin" ]; then
   sed "s|__TMUX_BOOT__|$HOME/.local/bin/tmux-boot|g" \
     "$DIR/macos/dev.dotfiles.tmux-boot.plist" > "$agent"
   echo "rendered $agent"
-  # reload so it's active this session too (ignore unload error if not loaded)
-  launchctl unload "$agent" 2>/dev/null
-  launchctl load "$agent" 2>/dev/null && echo "loaded LaunchAgent dev.dotfiles.tmux-boot"
+  # reload so it's active this session too. bootstrap, not the legacy load:
+  # `launchctl load` exits 0 even when it prints "Load failed", so its exit
+  # code can't gate the success message. bootout's error (not loaded) is fine;
+  # its teardown is async, so a bootstrap right after can transiently fail —
+  # retry once.
+  uid=$(id -u)
+  launchctl bootout "gui/$uid/dev.dotfiles.tmux-boot" 2>/dev/null
+  if launchctl bootstrap "gui/$uid" "$agent" 2>/dev/null ||
+     { sleep 2; launchctl bootstrap "gui/$uid" "$agent"; }; then
+    echo "loaded LaunchAgent dev.dotfiles.tmux-boot"
+  else
+    echo "WARN: bootstrap failed. The agent is installed and still loads at next login" >&2
+    echo "      unless the service is disabled. If it was disabled, run:" >&2
+    echo "      launchctl enable gui/$uid/dev.dotfiles.tmux-boot && launchctl bootstrap gui/$uid $agent" >&2
+  fi
 fi

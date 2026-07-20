@@ -222,6 +222,12 @@ cmd_new() {
     esac
   done
   [ -n "$branch" ] || die "usage: wt new <branch> [--from <base>] [--current] [--repo <dir>]"
+  # Reject anything git wouldn't take as a branch name before it can do harm:
+  # $branch is free-typed picker input and lands in a fetch refspec below,
+  # where a stray ':' or '+' would mutate arbitrary local refs as a side
+  # effect. Also rejects "HEAD" and leading '-'.
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 ||
+    die "invalid branch name: $branch"
 
   local root repo s wt_path session base
   root=$(primary_root "$repo_dir") || die "not a git repo: $repo_dir"
@@ -255,6 +261,20 @@ cmd_new() {
     start="origin/$base"
   fi
 
+  # Freshen/discover the branch on origin — skipped when it already exists
+  # locally (attach uses local state either way). The explicit refspec, not a
+  # bare name: narrow-refspec clones (--single-branch / --depth) would update
+  # only FETCH_HEAD and never create origin/<branch>, silently steering the
+  # remote arm below wrong. Quietly tolerates offline and no-such-branch,
+  # like the base fetch. (A branch deleted server-side keeps its stale
+  # origin/<branch> here — indistinguishable from being offline — so the
+  # remote arm may attach to the stale ref: accepted.)
+  # (${branch}, braced: an unbraced $branch: would eat ':r' as a zsh
+  # csh-style modifier and silently mangle the refspec)
+  git -C "$root" show-ref -q --verify "refs/heads/$branch" ||
+    git -C "$root" fetch --quiet origin \
+      "+refs/heads/${branch}:refs/remotes/origin/$branch" 2>/dev/null
+
   # git chatter ("HEAD is now at …") goes to stderr: stdout is reserved for
   # the session name — the picker captures it via $(wt new --no-attach …)
   mkdir -p "$STORE/$repo"
@@ -262,6 +282,22 @@ cmd_new() {
     # existing branch: attach a worktree to it (git refuses if it's already
     # checked out elsewhere — surface its error as-is)
     git -C "$root" worktree add "$wt_path" "$branch" 1>&2 || exit 1
+  elif git -C "$root" show-ref -q --verify "refs/remotes/origin/$branch"; then
+    # remote-only branch: local branch off it, not checkout DWIM — same
+    # distrust as the guard below. (Without this arm the fallthrough would
+    # silently mint a NEW "$branch" off "$start", shadowing the remote
+    # branch of the same name.) An explicit base contradicts attaching —
+    # refuse rather than guess.
+    if [ -n "$from" ] || [ -n "$use_current" ]; then
+      die "'$branch' exists on origin — drop --from/--current to attach it, or pick another name"
+    fi
+    git -C "$root" worktree add -b "$branch" "$wt_path" "origin/$branch" 1>&2 || exit 1
+    # upstream best-effort, separately: an explicit --track on the add would
+    # hard-fail in narrow-refspec clones (--single-branch/--depth), where
+    # origin/<branch> can't be mapped back through remote.origin.fetch. There
+    # the branch still lands on the right tip, just without upstream; normal
+    # clones get tracking from autosetup or from this call.
+    git -C "$root" branch --set-upstream-to "origin/$branch" "$branch" >/dev/null 2>&1
   else
     git -C "$root" worktree add -b "$branch" "$wt_path" "$start" 1>&2 || exit 1
   fi
@@ -406,7 +442,8 @@ usage() {
 wt — git worktrees as tmux sessions ($STORE/<repo>/<slug>)
 
   wt new <branch> [--from <base>] [--current] [--repo <dir>] [--no-attach]
-                       create branch + worktree + session (base: origin/HEAD)
+                       create branch + worktree + session (base: origin/HEAD);
+                       an existing local or origin branch is attached as-is
   wt open <repo> <slug> [--no-attach]
                        attach-or-create the session for an existing worktree
                        (--no-attach: print the session name only — picker plumbing)

@@ -114,10 +114,34 @@ case "$key" in
         ;;
     esac
     [ -n "$proj" ] || { printf 'no project directory for "%s"\n' "$entry"; again }
-    printf 'branch for %s ▸ ' "$proj"
-    read -r branch
-    [ -z "$branch" ] && exec "$0"
-    if name=$(wt new --no-attach --repo "$WORKSPACE_DIR/$proj" "$branch"); then
+    pdir="$WORKSPACE_DIR/$proj"
+    # Branch fzf: existing branches (local + origin, deduped) minus any
+    # checked out somewhere — git refuses those, and branches in managed
+    # worktrees are already ●/⌥ entries in the main list. Enter attaches the
+    # highlighted branch; once the list is empty (nothing matches) Enter
+    # creates the typed name. Accepted limitation, by choice: a new name
+    # that fuzzy-matches an existing branch ("wip" vs "swipe-fix") never
+    # empties the list, so create it with `wt new` from a shell instead.
+    # No fetch here — ctrl-o stays instant; wt new freshens the chosen ref.
+    used=( ${(f)"$(git -C "$pdir" worktree list --porcelain 2>/dev/null |
+                   awk '$1=="branch"{sub("refs/heads/","",$2); print $2}')"} )
+    cand=( ${(f)"$( {
+        git -C "$pdir" branch --format='%(refname:short)'
+        git -C "$pdir" branch -r --format='%(refname:short)' |
+          sed -n 's|^origin/||p' | grep -vx HEAD
+      } 2>/dev/null | sort -u )"} )
+    cand=( ${cand:|used} )
+    out=$( { (( ${#cand} )) && printf '%s\n' "${cand[@]}" } |
+      fzf --prompt="branch for $proj ▸ " --height=100% --reverse --print-query \
+          --header='enter pick branch · no match → enter creates typed name · Esc back' )
+    # fzf exits 0 (match) / 1 (no match: query only) / 2 (error) / 130 (Esc,
+    # ctrl-c) — anything ≥2 goes back to the picker.
+    [ $? -ge 2 ] && exec "$SELF"
+    # --print-query emits "query\nselection"; the last line is the selection
+    # when one matched, otherwise the typed query = the new branch's name
+    branch=${out##*$'\n'}
+    [ -z "$branch" ] && exec "$SELF"
+    if name=$(wt new --no-attach --repo "$pdir" "$branch"); then
       settitle "$name"
       exec tmux attach -t "=$name"
     fi

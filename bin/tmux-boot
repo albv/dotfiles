@@ -30,13 +30,17 @@ others() { "$tmux_bin" list-sessions -F '#S' 2>/dev/null | grep -vx _boot }
 # wins new-session and the other's duplicate simply errors out (harmless).
 "$tmux_bin" list-sessions >/dev/null 2>&1 || "$tmux_bin" new-session -d -s _boot 2>/dev/null
 
-# Wait (bounded) for continuum's background restore to finish, by watching for
-# the sessions the snapshot says should exist (field 2 of its pane lines).
-# Fast path: the moment every expected session is live we are settled — zero
-# extra delay when the server was already up. Fallback: if some never appear
-# (a snapshot listing a session killed without a save since), settle once the
-# list is non-empty and unchanged across 5 polls. No snapshot, or one with no
-# real sessions, means nothing will be restored — skip the wait entirely.
+# Wait (bounded) for continuum's background restore to FINISH — not merely for
+# its sessions to exist. Session existence is a false settle signal: resurrect
+# creates every session up front, then spends seconds restoring pane processes,
+# and ends with bare `switch-client -t <session>` calls that assume no clients
+# are attached yet. A tab attached in that window gets yanked onto another
+# session by the tail (observed once as swapped WezTerm tab titles after a
+# reboot). The true signal is @resurrect-hook-post-restore-all (~/.tmux.conf),
+# which sets TMUX_RESTORE_SETTLED in the server environment as restore's last
+# act; server-scoped, so a fresh boot always starts without it. Capped at 30s
+# in case restore dies before its hook. No snapshot, or one with no real
+# sessions, means no restore and no flag — skip the wait entirely.
 # Snapshot location mirrors resurrect's own resolution: legacy dir, then XDG.
 snapshot_file() {
   local d
@@ -46,37 +50,18 @@ snapshot_file() {
   return 1
 }
 want=''
-f=$(snapshot_file) && want=$(awk -F'\t' '$1=="pane" && $2!="_boot" {print $2}' "$f" | sort -u)
-# $1 = current session list; true when every wanted session is in it. Pure
-# zsh line matching: BSD awk can't take multi-line -v strings, and session
-# names may contain spaces, so no field splitting either.
-settled() {
-  local w
-  for w in ${(f)want}; do
-    [[ $'\n'"$1"$'\n' == *$'\n'"$w"$'\n'* ]] || return 1
-  done
-  return 0
-}
+f=$(snapshot_file) && want=$(awk -F'\t' '$1=="pane" && $2!="_boot" {print $2; exit}' "$f")
 # Continuum's restore fires exclusively at server start, so a server that has
-# been up for a while finished restoring long ago — waiting would only stall
-# (worst on an alive-but-empty server, where the fallback can never trigger).
-# start_time is a server-level format; if it can't be read (no session to
-# anchor display-message on), treat the server as old and skip the wait.
+# been up for a while finished restoring long ago — its flag is either already
+# set or never coming; waiting would only stall. start_time is a server-level
+# format; if it can't be read (no session to anchor display-message on), treat
+# the server as old and skip the wait.
 srv_start=$("$tmux_bin" display -p '#{start_time}' 2>/dev/null)
 [ -n "$srv_start" ] || srv_start=0
 age=$(( $(date +%s) - srv_start ))
 if [ -n "$want" ] && [ "$age" -lt 60 ]; then
-  prev='' stable=0
-  for _ in {1..75}; do
-    cur=$(others)
-    settled "$cur" && break
-    if [ -n "$cur" ] && [ "$cur" = "$prev" ]; then
-      stable=$((stable + 1))
-      [ "$stable" -ge 5 ] && break
-    else
-      stable=0
-      prev=$cur
-    fi
+  for _ in {1..150}; do
+    "$tmux_bin" show-environment -g TMUX_RESTORE_SETTLED >/dev/null 2>&1 && break
     sleep 0.2
   done
 fi

@@ -88,7 +88,12 @@ config.keys = {
     action = wezterm.action_callback(function(window, pane)
       local pok, ran, out = pcall(wezterm.run_child_process,
         { '/usr/bin/osascript', '-e', 'clipboard info' })
-      if pok and ran and out and (out:find 'PNGf' or out:find 'TIFF') then
+      local has_image = out and (out:find 'PNGf' or out:find 'TIFF'
+        or out:find 'JPEG' or out:find 'GIFf')
+      local has_text = out and (out:find 'utf8' or out:find 'string')
+      -- no text flavor at all: a text paste would paste nothing, so trying
+      -- the app's own clipboard read (Ctrl+V) is strictly better
+      if pok and ran and (has_image or not has_text) then
         window:perform_action(wezterm.action.SendString '\x16', pane)
       else
         window:perform_action(wezterm.action.PasteFrom 'Clipboard', pane)

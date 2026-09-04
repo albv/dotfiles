@@ -32,17 +32,55 @@ worktrees=$(find "$STORE" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | while IF
   printf '%s\n' "$sessions" | grep -qxF "$name" || printf '%s/%s\n' "$repo" "$wt"
 done)
 
-# Existing sessions first (marked ●), then project dirs without a session
-# yet, then orphaned worktrees (marked ⌥). ctrl-o (not ctrl-w: that's fzf's
-# default delete-word, and --expect would steal it from query typing).
+# Grouped list: each project line (● live session, or bare dir without one)
+# is followed by its worktrees indented beneath it — live sessions (●) first,
+# then revivable orphans (⌥). Children match parents by munged name
+# (. : -> _), the same rule session names are built with. Worktrees whose
+# parent vanished entirely (no session, no project dir) fall to the bottom
+# ungrouped, in their old full form. ctrl-o (not ctrl-w: that's fzf's default
+# delete-word, and --expect would steal it from query typing).
+# A session counts as a worktree session only when it exactly matches a store
+# entry's (munged repo)--(slug) — whole-name comparison, the same rule wt's
+# resolve_target uses. Never split on '--' positionally: a plain project that
+# happens to contain '--' must stay a project, and a repo named with '--' must
+# group its worktrees under itself, not under its first name segment.
+typeset -A wt_parent orph_parent grouped
+for d in "$STORE"/*/*(/N); do
+  wt_parent[${${d:h:t}//[.:]/_}--${d:t}]=${${d:h:t}//[.:]/_}
+done
+asessions=( ${(f)sessions} )
+psessions=(); wsessions=()
+for s in $asessions; do
+  if [[ -n ${wt_parent[$s]} ]]; then wsessions+=("$s"); else psessions+=("$s"); fi
+done
+orphans=( ${(f)worktrees} )
+projs=( ${(f)projects} )
+for w in $orphans; do orph_parent[$w]=${${w%%/*}//[.:]/_}; done
+
+list=()
+add_children() {  # $1 = munged parent name; each child grouped at most once
+  local s w
+  for s in $wsessions; do
+    [[ ${wt_parent[$s]} == "$1" && -z ${grouped[s$s]} ]] && { list+=("   └ ● $s"); grouped[s$s]=1 }
+  done
+  for w in $orphans; do
+    [[ ${orph_parent[$w]} == "$1" && -z ${grouped[o$w]} ]] && { list+=("   └ ⌥ $w"); grouped[o$w]=1 }
+  done
+}
+for s in $psessions; do list+=("● $s"); add_children "$s"; done
+for p in $projs; do
+  m=${p//[.:]/_}
+  # dedupe against ALL sessions (as before grouping existed): a dir whose
+  # munged name matches any live session keeps a single row, never two
+  (( ${asessions[(Ie)$m]} )) && continue
+  list+=("$p"); add_children "$m"
+done
+for s in $wsessions; do (( ${+grouped[s$s]} )) || list+=("● $s"); done
+for w in $orphans; do (( ${+grouped[o$w]} )) || list+=("⌥ $w"); done
+
 out=$(
-  {
-    [ -n "$sessions" ] && printf '%s\n' "$sessions" | sed 's/^/● /'
-    [ -n "$projects" ] && printf '%s\n' "$projects" | while IFS= read -r p; do
-      printf '%s\n' "$sessions" | grep -qxF "$(printf '%s' "$p" | tr '.:' '__')" || printf '%s\n' "$p"
-    done
-    [ -n "$worktrees" ] && printf '%s\n' "$worktrees" | sed 's/^/⌥ /'
-  } | fzf --prompt='project ▸ ' --height=100% --reverse \
+  { (( ${#list} )) && printf '%s\n' "${list[@]}" } |
+    fzf --prompt='project ▸ ' --height=100% --reverse \
         --expect=ctrl-o,ctrl-x \
         --header='enter attach · ctrl-o new worktree · ctrl-x remove worktree · Esc shell'
 )
@@ -53,6 +91,9 @@ key=${out%%$'\n'*}
 choice=${out#*$'\n'}
 [[ $out == *$'\n'* ]] || choice=""
 [ -z "$choice" ] && exec zsh
+# grouped child rows carry an indent; shed it so every parse below sees the
+# same ●/⌥-prefixed forms as before grouping existed
+choice=${choice#'   └ '}
 
 # Deterministic WezTerm tab title (immune to OSC title races)
 settitle() {
@@ -86,8 +127,9 @@ resolve_project() {
 }
 
 # Strip the ●/⌥ markers the picker itself added. (A directory literally
-# named like "● foo" is listed unmarked yet still matches the marked
-# patterns below and gets misrouted — accepted; don't name dirs that.)
+# named like "● foo" — or "   └ ● foo" now that children are indented — is
+# listed unmarked yet still matches the marked patterns below and gets
+# misrouted — accepted; don't name dirs that.)
 entry=$choice
 case "$entry" in
   "● "*) entry=${entry#● } ;;

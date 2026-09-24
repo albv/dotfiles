@@ -1,6 +1,7 @@
 #!/bin/sh
 # Symlink these dotfiles into place. Idempotent: safe to re-run anytime.
-# A real file already at a target is backed up to <name>.bak first.
+# A real file already at a target is backed up to <name>.bak first
+# (skills excepted: see below).
 DIR=$(cd "$(dirname "$0")" && pwd)
 
 link() {
@@ -26,6 +27,30 @@ link bin/tmux-snapshot          "$HOME/.local/bin/tmux-snapshot"
 chmod +x "$DIR/bin/wezterm-project-picker" "$DIR/bin/wt" \
          "$DIR/bin/tmux-boot" "$DIR/bin/tmux-snapshot" \
          "$DIR/claude/statusline.sh"
+
+# Agent skills: link each .agents/skills/<name> into every harness's skill
+# dir, one link per skill since Claude Code won't follow a symlinked skills
+# dir. Those dirs also hold other tools' skills, so a real dir at a target is
+# left alone, and only dangling links that pointed into this repo are pruned.
+skills="$DIR/.agents/skills"
+for dest in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
+  mkdir -p "$dest"
+  for entry in "$dest"/*; do
+    [ -L "$entry" ] && [ ! -e "$entry" ] || continue
+    case $(readlink "$entry") in
+      "$skills"/*) rm "$entry"; echo "pruned dangling $entry" ;;
+    esac
+  done
+  for src in "$skills"/*; do
+    [ -f "$src/SKILL.md" ] || continue
+    target="$dest/${src##*/}"
+    if [ -e "$target" ] && [ ! -L "$target" ]; then
+      echo "WARN: $target is a real directory; not linking over it" >&2
+      continue
+    fi
+    ln -sfn "$src" "$target" && echo "linked $target -> $src"
+  done
+done
 
 # tmux plugins: tpm + everything declared via `set -g @plugin` in tmux.conf.
 # Cloning each into ~/.tmux/plugins/<name> is exactly what tpm's `prefix + I`

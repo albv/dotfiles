@@ -35,8 +35,6 @@ base_branch() {
   return 1
 }
 
-settitle() { wezterm cli set-tab-title "$1" 2>/dev/null }
-
 # wezterm with the inherited WEZTERM_* stripped: inside tmux those are baked
 # in at server start, and a stale socket/pane id makes every cli call fail.
 # Unset, the cli auto-discovers the running GUI's socket.
@@ -58,8 +56,11 @@ spawn_tab() {
   wid=$(wz cli list --format json 2>/dev/null |
         jq -r --argjson p "${p:-null}" '([.[]|select(.pane_id==$p)][0] // .[0]).window_id' 2>/dev/null)
   if [ -n "$wid" ] && [ "$wid" != "null" ]; then
-    pane_id=$(wz cli spawn --window-id "$wid" -- /opt/homebrew/bin/tmux new-session -A -s "$1" 2>/dev/null) &&
-      wz cli set-tab-title --pane-id "$pane_id" "$1" 2>/dev/null && return 0
+    # the tab is open once spawn succeeds; a failed title is cosmetic
+    if pane_id=$(wz cli spawn --window-id "$wid" -- /opt/homebrew/bin/tmux new-session -A -s "$1" 2>/dev/null); then
+      wz cli set-tab-title --pane-id "$pane_id" "$1" 2>/dev/null
+      return 0
+    fi
   fi
   print -u2 "wt: couldn't open a WezTerm tab; attach with: tmux attach -t '=$1'"
 }
@@ -88,8 +89,8 @@ ensure_session() {
   if [ -x "$dir/.session-setup" ]; then
     tmux send-keys -t "=$session:" "${(qq)dir}/.session-setup" Enter
   else
-    tmux split-window -h -l 30% -t "=$session:" -c "$dir"
-    tmux select-pane -t "=$session:.1"
+    # -d keeps focus on the first pane, whatever pane-base-index is
+    tmux split-window -d -h -l 30% -t "=$session:" -c "$dir"
   fi
   return 0
 }
@@ -104,19 +105,22 @@ open_session() {
   elif [ -n "$TMUX" ] || [ -n "$WEZTERM_PANE" ]; then
     spawn_tab "$session"
   else
-    settitle "$session"
     exec tmux attach -t "=$session"
   fi
 }
 
 # .worktreeinclude: gitignore-syntax patterns SELECTING untracked/ignored
 # files to copy into a fresh worktree (.env and friends). Tracked files
-# arrive via checkout, so the candidate set is --others --ignored only.
+# arrive via checkout; of the rest, only files that are ALSO gitignored
+# qualify (zsh ${a:*b} intersection) — a copied untracked-but-not-ignored
+# file would leave the worktree permanently dirty to done/gc.
 copy_include() {
   local root=$1 dest=$2 f
+  local -a inc ign
   [ -f "$root/.worktreeinclude" ] || return 0
-  git -C "$root" ls-files -z --others --ignored --exclude-from="$root/.worktreeinclude" 2>/dev/null |
-  while IFS= read -r -d $'\0' f; do
+  inc=( ${(0)"$(git -C "$root" ls-files -z --others --ignored --exclude-from="$root/.worktreeinclude" 2>/dev/null)"} )
+  ign=( ${(0)"$(git -C "$root" ls-files -z --others --ignored --exclude-standard 2>/dev/null)"} )
+  for f in ${inc:*ign}; do
     mkdir -p "$dest/${f:h}"
     cp -p "$root/$f" "$dest/$f"
   done
@@ -126,13 +130,13 @@ copy_include() {
 # safe toward "keep". $5 = skip-gh (used by ls: no network per row).
 is_landed() {
   local wt_path=$1 branch=$2 base=$3 root=$4 skip_gh=$5 upstream pr tip mb synth
-  # Detached worktrees report the literal string HEAD, which the -C "$root"
+  # Detached worktrees pass an empty branch; a bare HEAD in the -C "$root"
   # checks below would resolve in the PRIMARY clone (usually sitting on the
   # base branch) and pass trivially — destroying unmerged commits. Detached
   # state is unverifiable here: never "landed", --force remains the override.
-  if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
-    return 1
-  fi
+  [ -n "$branch" ] || return 1
+  # refs/heads/ spelled out: a same-named tag would otherwise win resolution
+  local ref="refs/heads/$branch"
   if git -C "$root" show-ref -q --verify "refs/remotes/origin/$base"; then
     upstream="origin/$base"
   else
@@ -148,12 +152,12 @@ is_landed() {
     [ "$pr" = "MERGED $tip" ] && return 0
   fi
   # (b) regular merge: branch tip reachable from upstream
-  git -C "$root" merge-base --is-ancestor "$branch" "$upstream" 2>/dev/null && return 0
+  git -C "$root" merge-base --is-ancestor "$ref" "$upstream" 2>/dev/null && return 0
   # (c) squash merge: collapse the branch into one synthetic commit and ask
   # git-cherry whether an equivalent patch already exists upstream ("-").
   # The throwaway commit is an unreachable object; gc cleans it up.
-  mb=$(git -C "$root" merge-base "$upstream" "$branch" 2>/dev/null) || return 1
-  synth=$(git -C "$root" commit-tree "$branch^{tree}" -p "$mb" -m _ 2>/dev/null) || return 1
+  mb=$(git -C "$root" merge-base "$upstream" "$ref" 2>/dev/null) || return 1
+  synth=$(git -C "$root" commit-tree "$ref^{tree}" -p "$mb" -m _ 2>/dev/null) || return 1
   [ "$(git -C "$root" cherry "$upstream" "$synth" 2>/dev/null)" = "- $synth" ]
 }
 
@@ -172,8 +176,7 @@ teardown() {
   [ "$root" = "$wt_path" ] && die "refusing to remove a primary clone"
   s=${wt_path:t}; repo=${wt_path:h:t}
   session="$(munge "$repo")--$s"
-  branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null)
-  [ "$branch" = "HEAD" ] && branch=""   # detached: nothing to delete
+  branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)   # empty if detached: nothing to delete
 
   git -C "$root" worktree remove ${force:+--force} "$wt_path" || return 1
   if [ -n "$branch" ]; then
@@ -213,9 +216,12 @@ cmd_new() {
   local branch='' from='' use_current='' repo_dir=$PWD
   while [ $# -gt 0 ]; do
     case "$1" in
-      --from) from=$2; shift 2 ;;
+      # arity check: zsh's `shift 2` on a lone trailing flag fails WITHOUT
+      # shifting, which would spin this loop forever
+      --from|--repo) [ $# -ge 2 ] || die "$1 needs a value"
+        if [ "$1" = --from ]; then from=$2; else repo_dir=$2; fi
+        shift 2 ;;
       --current) use_current=1; shift ;;
-      --repo) repo_dir=$2; shift 2 ;;
       --no-attach) NO_ATTACH=1; shift ;;
       -*) die "unknown flag for new: $1" ;;
       *) [ -n "$branch" ] && die "unexpected argument: $1"; branch=$1; shift ;;
@@ -241,8 +247,8 @@ cmd_new() {
   tmux has-session -t "=$session" 2>/dev/null && die "session $session already exists"
 
   if [ -n "$use_current" ]; then
-    base=$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD)
-    [ "$base" = "HEAD" ] && base=$(git -C "$repo_dir" rev-parse --short HEAD)
+    base=$(git -C "$repo_dir" branch --show-current)
+    [ -n "$base" ] || base=$(git -C "$repo_dir" rev-parse --short HEAD)   # detached
   elif [ -n "$from" ]; then
     base=$from
   else
@@ -251,14 +257,15 @@ cmd_new() {
   git -C "$root" fetch --quiet origin "$base" 2>/dev/null
 
   # Branch from fresh origin state when tracking exists: the fetch above
-  # only updates origin/<base>, so a bare "<base>" start point would fork
-  # from the stale local ref — or, if the local ref is missing, trip git's
-  # DWIM into checking out <base> itself instead of the new branch.
-  # --from/--current stay literal: the user asked for exactly that state.
+  # only updates origin/<base>, so a bare "<base>" would fork from the stale
+  # local ref. --from stays literal (the user asked for exactly that state)
+  # unless it only exists as origin/<from>; --current is the checkout's HEAD.
+  # Resolved to a commit in the new-branch arm below.
   local start=$base
-  if [ -z "$from" ] && [ -z "$use_current" ] &&
-     git -C "$root" show-ref -q --verify "refs/remotes/origin/$base"; then
-    start="origin/$base"
+  if [ -n "$use_current" ]; then
+    start=$(git -C "$repo_dir" rev-parse HEAD)
+  elif [ -z "$from" ] || ! git -C "$root" show-ref -q --verify "refs/heads/$base"; then
+    git -C "$root" show-ref -q --verify "refs/remotes/origin/$base" && start="origin/$base"
   fi
 
   # Freshen/discover the branch on origin — skipped when it already exists
@@ -276,18 +283,20 @@ cmd_new() {
       "+refs/heads/${branch}:refs/remotes/origin/$branch" 2>/dev/null
 
   # git chatter ("HEAD is now at …") goes to stderr: stdout is reserved for
-  # the session name — the picker captures it via $(wt new --no-attach …)
-  mkdir -p "$STORE/$repo"
+  # the session name — the picker captures it via $(wt new --no-attach …).
+  # No mkdir: worktree add creates parent dirs, and a failed add leaves none.
+  # Prune first: a worktree dir deleted by hand stays registered, and git
+  # refuses to add at a "missing but already registered" path.
+  git -C "$root" worktree prune 2>/dev/null
   if git -C "$root" show-ref -q --verify "refs/heads/$branch"; then
     # existing branch: attach a worktree to it (git refuses if it's already
     # checked out elsewhere — surface its error as-is)
     git -C "$root" worktree add "$wt_path" "$branch" 1>&2 || exit 1
   elif git -C "$root" show-ref -q --verify "refs/remotes/origin/$branch"; then
-    # remote-only branch: local branch off it, not checkout DWIM — same
-    # distrust as the guard below. (Without this arm the fallthrough would
-    # silently mint a NEW "$branch" off "$start", shadowing the remote
-    # branch of the same name.) An explicit base contradicts attaching —
-    # refuse rather than guess.
+    # remote-only branch: local branch off it, not checkout DWIM. (Without
+    # this arm the fallthrough would silently mint a NEW "$branch" off
+    # "$start", shadowing the remote branch of the same name.) An explicit
+    # base contradicts attaching — refuse rather than guess.
     if [ -n "$from" ] || [ -n "$use_current" ]; then
       die "'$branch' exists on origin — drop --from/--current to attach it, or pick another name"
     fi
@@ -299,13 +308,13 @@ cmd_new() {
     # clones get tracking from autosetup or from this call.
     git -C "$root" branch --set-upstream-to "origin/$branch" "$branch" >/dev/null 2>&1
   else
+    # start as a bare commit id, never a name: given a name that exists only
+    # as origin/<name>, `worktree add -b` DWIMs into checking out <name>
+    # itself (ignoring -b); from a remote-tracking ref it would set upstream
+    # to origin/<base>, breaking a plain `git push` under push.default=simple
+    start=$(git -C "$root" rev-parse --verify -q "$start^{commit}") ||
+      die "unknown start point: $base"
     git -C "$root" worktree add -b "$branch" "$wt_path" "$start" 1>&2 || exit 1
-  fi
-  # belt-and-suspenders against start-point DWIM: the checkout must be on
-  # the branch we asked for, never silently on the base
-  if [ "$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$branch" ]; then
-    git -C "$root" worktree remove --force "$wt_path" 2>/dev/null
-    die "git checked out the wrong branch (is '$base' missing locally?); nothing created"
   fi
 
   copy_include "$root" "$wt_path"
@@ -332,10 +341,8 @@ cmd_open() {
   [ -d "$wt_path" ] || die "no worktree at $wt_path"
   session="$(munge "$repo")--$s"
   if ! tmux has-session -t "=$session" 2>/dev/null; then
-    branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null)
-    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
-      branch=$s   # detached HEAD: display-only fallback
-    fi
+    branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)
+    [ -n "$branch" ] || branch=$s   # detached HEAD: display-only fallback
     base=$(base_branch "$wt_path") || base=''   # original fork point is gone; best effort
     ensure_session "$session" "$wt_path" "$repo" "$branch" "$base" || die "couldn't create session $session"
   fi
@@ -369,10 +376,13 @@ cmd_done() {
     [ -z "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ] ||
       die "$repo/$s has uncommitted changes (--force to override)"
     root=$(primary_root "$wt_path") || die "not a git worktree: $wt_path"
-    branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)
     base=$(base_branch "$root") || die "can't detect a base branch to check merges against (--force to override)"
+    # unlike gc, done may run long after the last fetch: a squash merge is
+    # invisible to (b)/(c) until origin/<base> catches up
+    git -C "$root" fetch --quiet origin 2>/dev/null
     is_landed "$wt_path" "$branch" "$base" "$root" ||
-      die "$repo/$s ($branch) doesn't look merged (--force to override)"
+      die "$repo/$s (${branch:-detached}) doesn't look merged (--force to override)"
   fi
   teardown "$wt_path" "$force"
 }
@@ -401,10 +411,10 @@ cmd_gc() {
       print "skip (dirty)   ${d:h:t}/${d:t}"
       continue
     fi
-    branch=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    branch=$(git -C "$d" branch --show-current 2>/dev/null)
     base=$(base_branch "$root") || { print "keep           ${d:h:t}/${d:t} (no base branch)"; continue }
     if ! is_landed "$d" "$branch" "$base" "$root"; then
-      print "keep           ${d:h:t}/${d:t} ($branch)"
+      print "keep           ${d:h:t}/${d:t} (${branch:-detached})"
       continue
     fi
     if [ -n "$dry" ]; then
@@ -427,13 +437,13 @@ cmd_ls() {
   for d in "$STORE"/*/*(/N); do
     session="$(munge "${d:h:t}")--${d:t}"
     if tmux has-session -t "=$session" 2>/dev/null; then mark="●"; else mark="⌥"; fi
-    branch=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch='?'
+    branch=$(git -C "$d" branch --show-current 2>/dev/null) || branch='?'
     merged=''
     # tiers b+c only: a gh network call per row would make ls sluggish
     if root=$(primary_root "$d") && base=$(base_branch "$root"); then
       is_landed "$d" "$branch" "$base" "$root" skip-gh && merged='merged'
     fi
-    printf '%s %-36s %-24s %s\n' "$mark" "${d:h:t}/${d:t}" "$branch" "$merged"
+    printf '%s %-36s %-24s %s\n' "$mark" "${d:h:t}/${d:t}" "${branch:-(detached)}" "$merged"
   done
 }
 

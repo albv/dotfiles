@@ -115,8 +115,15 @@ config.default_prog = { wezterm.home_dir .. '/.local/bin/wezterm-project-picker'
 -- never build tabs from an empty or half-restored server. It's idempotent, so
 -- overlapping with the agent is safe. (Cost: at most a few seconds' wait before
 -- the window appears, and only when there is genuinely nothing to restore.)
-wezterm.on('gui-startup', function()
+wezterm.on('gui-startup', function(cmd)
   local mux = wezterm.mux
+  -- `wezterm start -- prog` passes an explicit command (nil on a plain
+  -- launch): honor it as-is instead of rebuilding the tmux tabs. Keyed on
+  -- args only, so a bare --cwd still gets the usual restore.
+  if cmd and cmd.args then
+    mux.spawn_window(cmd)
+    return
+  end
   -- pcall: run_child_process RAISES if the binary is missing, and an
   -- uncaught error here would leave WezTerm with no window at all
   local called, ok, stdout = pcall(wezterm.run_child_process, {
@@ -126,7 +133,7 @@ wezterm.on('gui-startup', function()
   if called and ok and stdout ~= '' then
     for name in stdout:gmatch '[^\n]+' do
       local args = { '/opt/homebrew/bin/tmux', 'new-session', '-A', '-s', name }
-      local tab
+      local tab, _
       if not window then
         tab, _, window = mux.spawn_window { args = args }
       else
@@ -176,7 +183,8 @@ wezterm.on('format-tab-title', function(tab)
   if #title == 0 then
     title = tab.active_pane.title
   end
-  if #title > 24 then
+  -- columns, not bytes: #title over-counts non-ASCII names
+  if wezterm.column_width(title) > 24 then
     title = wezterm.truncate_right(title, 23) .. '…'
   end
   title = (tab.tab_index + 1) .. ': ' .. title

@@ -64,6 +64,11 @@ if [ -n "$want" ] && [ "$age" -lt 60 ]; then
     "$tmux_bin" show-environment -g TMUX_RESTORE_SETTLED >/dev/null 2>&1 && break
     sleep 0.2
   done
+elif [ -z "$want" ]; then
+  # Nothing to restore, so resurrect's hook never fires: declare the server
+  # settled ourselves, or bin/tmux-snapshot (which holds saves until settle)
+  # would never record this server going empty.
+  "$tmux_bin" set-environment -g TMUX_RESTORE_SETTLED 1 2>/dev/null
 fi
 
 # Reconcile before building tabs: a restored worktree session whose store

@@ -23,10 +23,12 @@ underneath keeps everything alive across disconnects and reboots.
   branch, and a tmux session in one step, isolated from your main checkout.
   `wt gc` later sweeps the ones whose work has merged.
 - **Survives reboot.** Every session change triggers a snapshot; at login a
-  launchd agent restores the sessions headlessly and WezTerm reopens a tab
-  per session, with panes, layouts, scrollback, and coding agents intact.
-- **Silent notifications.** When a long command or a coding agent finishes,
-  its tab highlights and macOS shows a toast. No sound, anywhere.
+  launchd agent restores the sessions headlessly, and when WezTerm opens it
+  reopens a tab per session, with panes, layouts, scrollback, and coding
+  agents intact.
+- **Silent notifications.** When a program rings the bell (a coding agent
+  finishing, say), its tab highlights, and if WezTerm isn't focused macOS
+  shows a toast. No sound, anywhere.
 - **One home for agent skills.** Skills live in `.agents/skills/` and get
   symlinked into every agent's skill directory, so Claude Code, Codex, and
   opencode all read the same copy.
@@ -79,7 +81,10 @@ open -a WezTerm
 `install.sh` is idempotent; run it as often as you like. It:
 
 - symlinks every config into place, so editing `~/.tmux.conf` or
-  `~/.wezterm.lua` edits this repo,
+  `~/.wezterm.lua` edits this repo. A real file in the way is moved to
+  `<name>.bak` (or `<name>.bak.<timestamp>` if that exists, so no backup is
+  ever overwritten); a symlink pointing elsewhere is replaced with a note
+  naming its old target,
 - links every skill in `.agents/skills/` into the agents' skill directories,
 - installs the tmux plugins declared via `@plugin` in `tmux.conf` (tpm,
   tmux-resurrect, tmux-continuum), no `prefix + I` needed,
@@ -137,14 +142,17 @@ boot a dev server, launch a coding agent, whatever the project needs. Commit
 it, or list it in `.worktreeinclude`. It runs in the session's first pane on
 creation; `wt` itself stays agent-agnostic.
 
-The script (and every pane in the session) inherits these variables:
+Sessions created by `wt` carry these variables in their environment, so the
+script and every pane spawned in the session inherit them. Sessions the
+picker creates for a plain project don't have them, and resurrect doesn't
+restore them after a reboot:
 
 | Variable | Value |
 |---|---|
 | `WT_WORKTREE_PATH` | the worktree directory (also the pane's cwd) |
 | `WT_REPO` | repository name (e.g. `myrepo`) |
 | `WT_BRANCH` | the worktree's branch (e.g. `feature/login`) |
-| `WT_BASE_BRANCH` | branch it was forked from (e.g. `main`; may be empty for a reopened worktree) |
+| `WT_BASE_BRANCH` | branch it was forked from (e.g. `main`); for `wt open` it's the repo's default branch, or empty if none is found |
 
 For example, to open a split and start Claude Code in the main pane:
 
@@ -168,7 +176,8 @@ The agents get their skills from this repo too. `.agents/skills/` holds
 Code, Codex, opencode, and most other coding agents understand. `install.sh`
 symlinks each skill into `~/.claude/skills/` and `~/.agents/skills/`, so one
 copy serves every agent and an edit here is live everywhere. Re-run it after
-adding, removing, or renaming a skill; it also prunes dead links.
+adding, removing, or renaming a skill; it also prunes dead links that
+pointed into this repo.
 
 ```sh
 # -a codex: Codex's project dir is .agents/skills/, so the skill lands only there
@@ -179,13 +188,16 @@ npx skills add <owner/repo> -s <name> -a codex -y
 Read a skill before you link it: it is instructions, and often scripts, that
 your agents will follow with their full permissions.
 
-To keep a skill, commit it along with `skills-lock.json`. To drop one, run
+To keep a skill, commit it along with the `skills-lock.json` that
+`npx skills` writes (the repo has none until the first skill is added). To
+drop one, run
 `npx skills remove <name>` (which also updates the lock) and re-run
 `install.sh`. `npx skills update` pulls upstream changes. A skill of your own
 is just a hand-written `.agents/skills/<name>/SKILL.md`.
 
-`install.sh` never overwrites a real directory in the agents' skill dirs;
-if a name collides with one, it warns and skips that skill.
+`install.sh` never overwrites a real directory, or a live link to somewhere
+else, in the agents' skill dirs; if a name collides with one, it warns and
+skips that skill.
 
 ---
 
@@ -194,7 +206,7 @@ if a name collides with one, it warns and skips that skill.
 | | |
 |---|---|
 | **Autosave** | event-driven: every session create/close and tab detach triggers a debounced snapshot via `bin/tmux-snapshot` (a single serialized writer; continuum's timer is off) |
-| **At login** | a launchd agent runs `bin/tmux-boot`, which starts tmux headlessly; continuum restores your sessions, `tmux-boot` sweeps the stale worktree ones, and WezTerm reopens a tab per session |
+| **At login** | a launchd agent runs `bin/tmux-boot`, which starts tmux headlessly; continuum restores your sessions, `tmux-boot` sweeps the stale worktree ones, and WezTerm reopens a tab per session when it starts (add it to Login Items to have it open by itself) |
 | **Agents** | resurrect replays each allowlisted pane's command verbatim; a pane started with `claude -c` comes back continuing. Add agents to `@resurrect-processes` in `tmux/tmux.conf`, e.g. `'"~claude" "~aider"'` |
 | **Manual** | `Ctrl-a Ctrl-s` save · `Ctrl-a Ctrl-r` restore |
 
@@ -202,8 +214,10 @@ if a name collides with one, it warns and skips that skill.
 
 ## Customizing
 
-- **Workspace root.** Defaults to `~/Workspace`. Set `WORKSPACE_DIR`, or
-  edit the variable at the top of `bin/wt` and `bin/wezterm-project-picker`.
+- **Workspace root.** Defaults to `~/Workspace`. Set `WORKSPACE_DIR` in
+  `~/.zshenv`, not `~/.zshrc`: the picker runs under WezTerm and `tmux-boot`
+  under launchd, and neither reads `.zshrc`. Or edit the default in
+  `bin/wt`, `bin/wezterm-project-picker`, and `bin/tmux-boot`.
 - **Swap the agent.** Change the command in your repos' `.session-setup`,
   and update the allowlist in `tmux/tmux.conf`.
 - **Theme / font / keys.** `wezterm/wezterm.lua` and `tmux/tmux.conf` are
@@ -223,7 +237,7 @@ if a name collides with one, it warns and skips that skill.
 | `bin/tmux-snapshot` | `~/.local/bin/tmux-snapshot` | debounced single-writer resurrect save (fired by tmux hooks on session create/close, tab detach) |
 | `claude/statusline.sh` | `~/.claude/statusline.sh` | Claude Code status line (opt-in: point Claude's `statusLine` setting at it) |
 | `.agents/skills/<name>/` | `~/.claude/skills/<name>`, `~/.agents/skills/<name>` | agent skills, linked per skill; add via `npx skills add` |
-| `skills-lock.json` | — | source and content-hash pins for skills installed via `npx skills` |
+| `skills-lock.json` | — | source and content-hash pins for skills installed via `npx skills` (written by it; absent until the first skill) |
 | `macos/dev.dotfiles.tmux-boot.plist` | `~/Library/LaunchAgents/…` | login agent (rendered + loaded by `install.sh`) |
 | `install.sh` | — | symlinks everything + installs the login agent; idempotent |
 
@@ -234,12 +248,15 @@ if a name collides with one, it warns and skips that skill.
 - The live files (`~/.tmux.conf`, `~/.wezterm.lua`, and friends) are
   symlinks into this repo, so editing them edits the repo. `git status` here
   shows your drift; commit as you go.
-- If an app ever replaces a symlink with a real file, re-run `install.sh`
-  and commit the difference.
+- If an app ever replaces a symlink with a real file, re-run `install.sh`:
+  it moves the file to `<name>.bak` (timestamped if that exists) and restores
+  the link. Diff the backup against the repo and commit what you want to
+  keep.
 - **The picker is empty?** It lists directories directly under
   `$WORKSPACE_DIR` (default `~/Workspace`); clone your project repos there.
 - **Sessions don't come back after a reboot?** Make sure the plugins
   installed (re-run `install.sh`, or `Ctrl-a I` inside tmux) and that a
   session was saved at least once. Saves fire automatically on session
   create/close and tab detach; force one with `Ctrl-a Ctrl-s`. Snapshots
-  live in `~/.local/share/tmux/resurrect`.
+  live in resurrect's default dir: `~/.tmux/resurrect` if it exists, else
+  `~/.local/share/tmux/resurrect`.

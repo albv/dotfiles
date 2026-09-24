@@ -19,18 +19,10 @@ command -v fzf >/dev/null 2>&1 || exec tmux new-session -A -s main
 
 # _boot is tmux-boot's throwaway bootstrap, not a project — never list it
 sessions=$(tmux list-sessions -F '#S' 2>/dev/null | grep -vx _boot)
-# -exec basename (not xargs): directory names with spaces must stay one entry.
-# -L: projects symlinked into the workspace root count too
-projects=$(find -L "$WORKSPACE_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.worktrees' -exec basename {} \; 2>/dev/null)
-
-# Worktrees whose session died (reboot, closed tab): revivable orphans.
-# Live worktree sessions already appear in the ● section above.
-worktrees=$(find "$STORE" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | while IFS= read -r d; do
-  repo=$(basename "$(dirname "$d")")
-  wt=$(basename "$d")
-  name="$(printf '%s' "$repo" | tr '.:' '__')--$wt"
-  printf '%s\n' "$sessions" | grep -qxF "$name" || printf '%s/%s\n' "$repo" "$wt"
-done)
+# Project dirs: (-/) follows symlinks, so projects symlinked into the
+# workspace root count too; sorted, and dot-dirs (.worktrees included) are
+# skipped by default globbing
+projs=( "$WORKSPACE_DIR"/*(-/N:t) )
 
 # Grouped list: each project line (● live session, or bare dir without one)
 # is followed by its worktrees indented beneath it — live sessions (●) first,
@@ -45,17 +37,20 @@ done)
 # happens to contain '--' must stay a project, and a repo named with '--' must
 # group its worktrees under itself, not under its first name segment.
 typeset -A wt_parent orph_parent grouped
-for d in "$STORE"/*/*(/N); do
-  wt_parent[${${d:h:t}//[.:]/_}--${d:t}]=${${d:h:t}//[.:]/_}
-done
 asessions=( ${(f)sessions} )
+# One pass over the store: map every worktree's session name to its munged
+# parent, and collect worktrees whose session died (reboot, closed tab) as
+# revivable orphans — live worktree sessions are listed as ● instead
+orphans=()
+for d in "$STORE"/*/*(/N); do
+  m=${${d:h:t}//[.:]/_}
+  wt_parent[$m--${d:t}]=$m
+  (( ${asessions[(Ie)$m--${d:t}]} )) || { orphans+=("${d:h:t}/${d:t}"); orph_parent[${d:h:t}/${d:t}]=$m }
+done
 psessions=(); wsessions=()
 for s in $asessions; do
   if [[ -n ${wt_parent[$s]} ]]; then wsessions+=("$s"); else psessions+=("$s"); fi
 done
-orphans=( ${(f)worktrees} )
-projs=( ${(f)projects} )
-for w in $orphans; do orph_parent[$w]=${${w%%/*}//[.:]/_}; done
 
 list=()
 add_children() {  # $1 = munged parent name; each child grouped at most once
@@ -90,7 +85,8 @@ out=$(
 key=${out%%$'\n'*}
 choice=${out#*$'\n'}
 [[ $out == *$'\n'* ]] || choice=""
-[ -z "$choice" ] && exec zsh
+# Esc → shell; an expect-key with nothing selected → back to the picker
+[ -z "$choice" ] && { [ -n "$key" ] && exec "$0"; exec zsh }
 # grouped child rows carry an indent; shed it so every parse below sees the
 # same ●/⌥-prefixed forms as before grouping existed
 choice=${choice#'   └ '}
@@ -118,7 +114,7 @@ resolve_project() {
   [ -d "$WORKSPACE_DIR/$1" ] && { printf '%s' "$1"; return 0 }
   local p
   for p in "$WORKSPACE_DIR"/*(-/N); do
-    if [ "$(printf '%s' "${p:t}" | tr '.:' '__')" = "$1" ]; then
+    if [ "${${p:t}//[.:]/_}" = "$1" ]; then
       printf '%s' "${p:t}"
       return 0
     fi
@@ -147,7 +143,7 @@ case "$key" in
         proj=$(resolve_project "$entry")
         if [ -z "$proj" ] && [[ "$entry" == *--* ]]; then
           for d in "$STORE"/*/*(/N); do
-            if [ "$(printf '%s' "${d:h:t}" | tr '.:' '__')--${d:t}" = "$entry" ]; then
+            if [ "${${d:h:t}//[.:]/_}--${d:t}" = "$entry" ]; then
               proj=$(resolve_project "${d:h:t}")
               break
             fi
@@ -212,7 +208,7 @@ case "$choice" in
     ;;
 esac
 
-name=$(printf '%s' "$choice" | tr '.:' '__')
+name=${choice//[.:]/_}
 dir="$WORKSPACE_DIR/$choice"
 [ -d "$dir" ] || dir="$HOME"
 

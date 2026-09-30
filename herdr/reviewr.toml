@@ -1,0 +1,7 @@
+# reviewr (herdr plugin persiyanov/herdr-reviewr): diff review pane, toggled
+# with Cmd+R. Only overrides live here; the plugin's README lists the rest.
+
+# Open filling the whole tab; toggle again to get the agent back. (New
+# worktree workspaces then no longer auto-open it: auto-open only does
+# split and tab.)
+toggle_placement = "zoomed"

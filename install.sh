@@ -32,6 +32,7 @@ link() {
 
 link wezterm/wezterm.lua        "$HOME/.wezterm.lua"
 link herdr/config.toml          "$HOME/.config/herdr/config.toml"
+link herdr/reviewr.toml         "$HOME/.config/herdr/plugins/config/persiyanov.reviewr/config.toml"
 link claude/statusline.sh       "$HOME/.claude/statusline.sh"
 link bin/wt                     "$HOME/.local/bin/wt"
 

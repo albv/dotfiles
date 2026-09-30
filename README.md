@@ -30,6 +30,10 @@ work: one task, one worktree, one branch, one workspace.
 - **Agents that drive agents.** With the Herdr skill, an agent can split a
   pane, start another agent there, prompt it, wait for it, and read its
   answer.
+- **Review diffs beside the agent.** Cmd-R toggles
+  [reviewr](https://github.com/persiyanov/herdr-reviewr), a Herdr plugin
+  that shows the agent's changes full-tab: comment on lines, then send the
+  comments to the agent's input.
 - **One home for agent skills.** Skills live in `.agents/skills/` and get
   symlinked into every agent's skill directory, so Claude Code, Codex, and
   opencode all read the same copy.
@@ -60,6 +64,9 @@ git clone <this-repo> ~/dotfiles
 
 # 3: let Herdr reopen Claude Code conversations after a restart
 herdr integration install claude
+
+# 4: the reviewr diff pane (Cmd-R); its config comes from herdr/reviewr.toml
+herdr plugin install persiyanov/herdr-reviewr
 ```
 
 Add this to `~/.zshrc` if it isn't already present, then open a new shell:
@@ -114,6 +121,7 @@ keyboard, the prefix is `Ctrl-a`, then one key:
 | `Ctrl-a v` / `Ctrl-a -` | split right / down |
 | `Ctrl-a h/j/k/l` | move between panes |
 | `Ctrl-a q` | detach (everything keeps running) |
+| `Cmd-R` | toggle the reviewr diff pane |
 
 ### Worktrees
 
@@ -205,8 +213,9 @@ the diff".
 
 | Repo file | Symlinked to | What it is |
 |---|---|---|
-| `wezterm/wezterm.lua` | `~/.wezterm.lua` | WezTerm: theme, every window runs Herdr, Cmd-T plain shell, Cmd-click links, smart Cmd-V |
-| `herdr/config.toml` | `~/.config/herdr/config.toml` | Herdr: `Ctrl-a` prefix, worktree dir, theme, silent notifications, pane history |
+| `wezterm/wezterm.lua` | `~/.wezterm.lua` | WezTerm: theme, every window runs Herdr, Cmd-T plain shell, Cmd-R reviewr, Cmd-click links, smart Cmd-V |
+| `herdr/config.toml` | `~/.config/herdr/config.toml` | Herdr: `Ctrl-a` prefix, reviewr key, worktree dir, theme, silent notifications, pane history |
+| `herdr/reviewr.toml` | `~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml` | reviewr plugin: opens zoomed |
 | `bin/wt` | `~/.local/bin/wt` | `wt gc`: sweep merged worktrees |
 | `claude/statusline.sh` | `~/.claude/statusline.sh` | Claude Code status line (opt-in: point Claude's `statusLine` setting at it) |
 | `.agents/skills/<name>/` | `~/.claude/skills/<name>`, `~/.agents/skills/<name>` | agent skills, linked per skill; add via `npx skills add` |

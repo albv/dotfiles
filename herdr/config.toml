@@ -16,6 +16,13 @@ name = "rose-pine"
 [keys]
 prefix = "ctrl+a"
 
+# Toggle the reviewr diff pane (plugin: persiyanov/herdr-reviewr). WezTerm
+# can't pass Cmd chords through, so its Cmd+R sends this ctrl+alt+r instead
+[[keys.command]]
+key = "ctrl+alt+r"
+type = "plugin_action"
+command = "persiyanov.reviewr.toggle"
+
 # All worktrees in one place, next to the projects: bin/wt's gc sweeps here
 [worktrees]
 directory = "~/Workspace/.worktrees"

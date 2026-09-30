@@ -103,6 +103,15 @@ config.keys = {
       end
     end),
   },
+  -- Cmd+R: toggle Herdr's reviewr diff pane. A terminal can't hand Cmd
+  -- chords to the app inside, so send ctrl+alt+r, which herdr/config.toml
+  -- binds to the toggle. Replaces WezTerm's reload-config (the config
+  -- reloads by itself on save anyway).
+  {
+    key = 'r',
+    mods = 'CMD',
+    action = wezterm.action.SendKey { key = 'r', mods = 'CTRL|ALT' },
+  },
   -- Cmd+T: a plain login shell outside Herdr (new windows still open Herdr).
   -- The way in when Herdr itself won't start, and for quick one-offs.
   {

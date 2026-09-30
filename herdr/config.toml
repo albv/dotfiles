@@ -1,0 +1,33 @@
+# Herdr: the agent-aware multiplexer behind every WezTerm window (see README).
+# Only the overrides live here; `herdr --default-config` prints the rest.
+# Apply edits to a running server with `herdr server reload-config`.
+# Herdr's settings screen (prefix+s) writes to this file through the symlink,
+# so changes made there show up in `git diff`.
+
+# First-run onboarding already done (written by Herdr itself). Top-level
+# keys must stay above the first [table].
+onboarding = false
+
+# The closest built-in to WezTerm's rose-pine-moon
+[theme]
+name = "rose-pine"
+
+# Ctrl-a, the prefix these fingers learned on tmux
+[keys]
+prefix = "ctrl+a"
+
+# All worktrees in one place, next to the projects: bin/wt's gc sweeps here
+[worktrees]
+directory = "~/Workspace/.worktrees"
+
+# Silent, like the rest of the setup: no sounds; a background agent that
+# finishes or needs input posts a macOS notification instead
+[ui.toast]
+delivery = "system"
+
+[ui.sound]
+enabled = false
+
+[experimental]
+# Keep recent pane screen history across server restarts and reboots
+pane_history = true

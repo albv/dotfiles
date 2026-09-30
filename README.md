@@ -1,49 +1,47 @@
-# dotfiles: a WezTerm + tmux project workspace
+# dotfiles: a WezTerm + Herdr agent workspace
 
-A macOS terminal setup where every tab is a project, feature work happens in
-git worktrees with their own tmux sessions, and the whole workspace survives
-a reboot: layouts, scrollback, running agents, all of it. Themed
-rose-pine-moon, with silent toast-only notifications.
+A macOS terminal setup built around coding agents. WezTerm is the window;
+[Herdr](https://herdr.dev) inside it runs every project as a workspace,
+shows which agent is working, blocked, or done across all of them, and
+keeps everything alive through closed windows and restarts. Themed
+rose-pine, with silent notifications.
 
-One rule holds it together: one tab, one project, one tmux session. For
-feature work: one task, one worktree, one branch, one session.
-
-WezTerm provides the window, tabs, theme, and notifications. tmux provides
-the sessions, splits, and persistence. You interact with WezTerm; tmux
-underneath keeps everything alive across disconnects and reboots.
+One rule holds it together: one project, one Herdr workspace. For feature
+work: one task, one worktree, one branch, one workspace.
 
 ---
 
 ## What you get
 
-- **Tabs are projects.** A new WezTerm tab opens an fzf picker of your
-  projects. Pick one and you're attached to its tmux session, created on
-  first use, reattached forever after.
-- **Worktrees as sessions.** `wt new <branch>` creates a git worktree, a
-  branch, and a tmux session in one step, isolated from your main checkout.
-  `wt gc` later sweeps the ones whose work has merged.
-- **Survives reboot.** Every session change triggers a snapshot; at login a
-  launchd agent restores the sessions headlessly, and when WezTerm opens it
-  reopens a tab per session, with panes, layouts, scrollback, and coding
-  agents intact.
-- **Silent notifications.** When a program rings the bell (a coding agent
-  finishing, say), its tab highlights, and if WezTerm isn't focused macOS
-  shows a toast. No sound, anywhere.
+- **Every window is Herdr.** WezTerm opens straight into the one Herdr
+  session; a second window (Cmd-N) attaches to the same session. Cmd-T
+  opens a plain shell tab outside Herdr.
+- **Agent status at a glance.** Herdr recognizes Claude Code, Codex, and
+  other agents in its panes, and its sidebar shows each one's state per
+  workspace. When a background agent finishes or needs input, you get a
+  silent macOS notification. No sound, anywhere.
+- **Worktrees as workspaces.** `herdr worktree create` (or `Ctrl-a
+  Shift-g`) makes a branch, a worktree under `~/Workspace/.worktrees`, and a
+  workspace for it. `wt gc` later sweeps the ones whose work has merged.
+- **Survives restarts.** Closing WezTerm leaves everything running. After a
+  Herdr server restart or a reboot, Herdr brings back workspaces, tabs, panes,
+  their directories, and recent screen contents, and reopens Claude Code
+  conversations where they left off.
+- **Agents that drive agents.** With the Herdr skill, an agent can split a
+  pane, start another agent there, prompt it, wait for it, and read its
+  answer.
 - **One home for agent skills.** Skills live in `.agents/skills/` and get
   symlinked into every agent's skill directory, so Claude Code, Codex, and
   opencode all read the same copy.
-- **Agents in worktrees.** A small `.session-setup` script wires any coding
-  agent into a repo's worktrees; after a reboot it continues where it left
-  off.
-- Plus the small stuff: Cmd-click opens URLs from inside tmux, vim-style
-  pane navigation, true color, and a consistent rose-pine-moon look.
+- Plus the small stuff: Cmd-click opens URLs through Herdr, Cmd-V pastes
+  images into Claude Code, and a consistent rose-pine look.
 
 ---
 
 ## Requirements
 
-- macOS. The setup relies on Homebrew paths (`/opt/homebrew`), a launchd
-  agent, and macOS notifications.
+- macOS. The setup relies on Homebrew paths (`/opt/homebrew`) and macOS
+  notifications.
 - Homebrew, and a zsh login shell (the macOS default).
 
 ---
@@ -53,121 +51,93 @@ underneath keeps everything alive across disconnects and reboots.
 ```sh
 # 1: terminal + tools
 brew install --cask wezterm@nightly
-brew install tmux fzf jq
+brew install herdr jq
 brew install gh          # optional: better merged-PR detection in `wt gc`
 
 # 2: clone this repo anywhere, then run the installer
 git clone <this-repo> ~/dotfiles
 ~/dotfiles/install.sh    # idempotent; backs up any real file it would replace
+
+# 3: let Herdr reopen Claude Code conversations after a restart
+herdr integration install claude
 ```
 
-Add these to `~/.zshrc` if they aren't already present, then open a new
-shell:
+Add this to `~/.zshrc` if it isn't already present, then open a new shell:
 
 ```sh
-export PATH="$HOME/.local/bin:$PATH"                       # for `wt`, the picker
-export PATH="$PATH:/Applications/WezTerm.app/Contents/MacOS" # for the `wezterm` CLI
+export PATH="$HOME/.local/bin:$PATH"   # for `wt`
 ```
 
 Then put your projects under the workspace root and launch:
 
 ```sh
-WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/Workspace}"   # default; override to taste
-mkdir -p "$WORKSPACE_DIR"
-git -C "$WORKSPACE_DIR" clone <some-project>        # the picker lists repos here
+mkdir -p ~/Workspace
+git -C ~/Workspace clone <some-project>
 open -a WezTerm
 ```
 
 `install.sh` is idempotent; run it as often as you like. It:
 
-- symlinks every config into place, so editing `~/.tmux.conf` or
-  `~/.wezterm.lua` edits this repo. A real file in the way is moved to
-  `<name>.bak` (or `<name>.bak.<timestamp>` if that exists, so no backup is
-  ever overwritten); a symlink pointing elsewhere is replaced with a note
-  naming its old target,
-- links every skill in `.agents/skills/` into the agents' skill directories,
-- installs the tmux plugins declared via `@plugin` in `tmux.conf` (tpm,
-  tmux-resurrect, tmux-continuum), no `prefix + I` needed,
-- on macOS, installs a launchd agent that restores tmux at login.
+- symlinks every config into place, so editing `~/.wezterm.lua` or
+  `~/.config/herdr/config.toml` edits this repo. A real file in the way is
+  moved to `<name>.bak` (or `<name>.bak.<timestamp>` if that exists, so no
+  backup is ever overwritten); a symlink pointing elsewhere is replaced with
+  a note naming its old target,
+- links every skill in `.agents/skills/` into the agents' skill directories.
 
 ---
 
 ## Verify
 
-- Open WezTerm. You should land in the project picker. Pick a project and
-  you're in its tmux session.
-- Open a couple of projects in tabs, quit WezTerm, reopen it. Your tabs come
-  back.
+- Open WezTerm. You land in Herdr. `cd` into a project and start `claude`;
+  the sidebar shows it.
+- Quit WezTerm and reopen it: everything is where you left it.
+- `herdr server stop`, then reopen WezTerm: workspaces, tabs, and panes come
+  back, and Claude Code resumes its conversation.
 
 ---
 
 ## Workflow
 
-### The picker (every new tab)
+### Herdr basics
 
-`Cmd-t` opens a new tab into the picker:
+The mouse covers everything: click panes, tabs, and workspaces to focus,
+drag split borders, right-click for menus, drag-select to copy. For the
+keyboard, the prefix is `Ctrl-a`, then one key:
 
 | Key | Action |
 |---|---|
-| **Enter** | attach (or create) the selected project's session |
-| **ctrl-o** | create a new worktree off a project (prompts for a branch) |
-| **ctrl-x** | remove a worktree |
-| **Esc** | drop to a plain shell |
+| `Ctrl-a ?` | every active binding |
+| `Ctrl-a w` | workspace picker |
+| `Ctrl-a Shift-n` | new workspace |
+| `Ctrl-a c` | new tab |
+| `Ctrl-a v` / `Ctrl-a -` | split right / down |
+| `Ctrl-a h/j/k/l` | move between panes |
+| `Ctrl-a q` | detach (everything keeps running) |
 
-Live sessions are marked `●`. Worktrees whose session died show as `⌥`;
-press Enter to revive them.
+### Worktrees
 
-### Worktrees (`wt`)
-
-Worktrees live centrally under `$WORKSPACE_DIR/.worktrees/<repo>/<slug>`
-(default `~/Workspace`); sessions are named `<repo>--<slug>`.
+Herdr creates and opens worktrees; `herdr/config.toml` stores them under
+`~/Workspace/.worktrees/<repo>/<branch-slug>`.
 
 ```
-wt new <branch>         create branch + worktree + session (off origin/HEAD)
-wt open <repo> <slug>   reattach (or recreate) an existing worktree's session
-wt done [name]          remove worktree + branch + session (refuses dirty/unmerged)
-wt gc                   sweep worktrees whose work has merged (PR / ancestry / squash)
-wt ls                   list worktrees: ● live / ⌥ orphaned, merged?
-wt help                 full help
+herdr worktree create --branch <name>   new branch + worktree + workspace (or Ctrl-a Shift-g)
+herdr worktree open                     open an existing one as a workspace
+herdr worktree list                     worktrees of the current repo
+herdr worktree remove --workspace <id>  remove checkout + workspace (keeps the branch)
+wt gc                                   sweep worktrees whose work has merged
 ```
 
-Drop a `.worktreeinclude` (gitignore syntax) in a repo to copy untracked
-files (`.env` and friends) into every fresh worktree.
+`wt gc` checks each worktree's branch against the repo's default branch
+(merged PR for that exact commit, ancestry, or squash-merge), and removes
+the landed ones along with their branch and any Herdr workspace showing
+them. It asks per worktree (`--all` doesn't, `--dry-run` only reports) and
+never touches a worktree with uncommitted changes.
 
-## Session setup
+Herdr doesn't copy untracked files (`.env` and friends) into a new worktree
+or run a per-repo setup script; copy what the task needs by hand.
 
-A fresh worktree opens plain shells. If a repo's sessions should start
-differently, give that repo an executable `.session-setup`: split panes,
-boot a dev server, launch a coding agent, whatever the project needs. Commit
-it, or list it in `.worktreeinclude`. It runs in the session's first pane on
-creation; `wt` itself stays agent-agnostic.
-
-Sessions created by `wt` carry these variables in their environment, so the
-script and every pane spawned in the session inherit them. Sessions the
-picker creates for a plain project don't have them, and resurrect doesn't
-restore them after a reboot:
-
-| Variable | Value |
-|---|---|
-| `WT_WORKTREE_PATH` | the worktree directory (also the pane's cwd) |
-| `WT_REPO` | repository name (e.g. `myrepo`) |
-| `WT_BRANCH` | the worktree's branch (e.g. `feature/login`) |
-| `WT_BASE_BRANCH` | branch it was forked from (e.g. `main`); for `wt open` it's the repo's default branch, or empty if none is found |
-
-For example, to open a split and start Claude Code in the main pane:
-
-```sh
-#!/bin/sh
-# .session-setup: assumes tmux pane-base-index 1 (this config's default)
-tmux split-window -h -l 30% -c "$PWD"
-tmux select-pane -t 1
-tmux send-keys -t 1 'claude --dangerously-skip-permissions -c' Enter
-```
-
-Here `claude -c` continues that directory's conversation, or starts fresh if
-there isn't one, so reopening or reviving a worktree resumes where you left
-off. Swap the command for any other agent, or drop it for a plain dev
-layout.
+---
 
 ## Agent skills
 
@@ -189,39 +159,45 @@ Read a skill before you link it: it is instructions, and often scripts, that
 your agents will follow with their full permissions.
 
 To keep a skill, commit it along with the `skills-lock.json` that
-`npx skills` writes (the repo has none until the first skill is added). To
-drop one, run
-`npx skills remove <name>` (which also updates the lock) and re-run
-`install.sh`. `npx skills update` pulls upstream changes. A skill of your own
-is just a hand-written `.agents/skills/<name>/SKILL.md`.
+`npx skills` writes. To drop one, run `npx skills remove <name>` (which also
+updates the lock) and re-run `install.sh`. `npx skills update` pulls
+upstream changes. A skill of your own is just a hand-written
+`.agents/skills/<name>/SKILL.md`.
 
 `install.sh` never overwrites a real directory, or a live link to somewhere
 else, in the agents' skill dirs; if a name collides with one, it warns and
 skips that skill.
 
+The `herdr` skill (from `herdrdev/herdr`) teaches agents to control Herdr
+from inside one of its panes. It only activates when you mention Herdr, for
+example "use herdr to start codex in a pane next to me and have it review
+the diff".
+
 ---
 
-## Persistence & reboot
+## Persistence & restarts
 
 | | |
 |---|---|
-| **Autosave** | event-driven: every session create/close and tab detach triggers a debounced snapshot via `bin/tmux-snapshot` (a single serialized writer; continuum's timer is off) |
-| **At login** | a launchd agent runs `bin/tmux-boot`, which starts tmux headlessly; continuum restores your sessions, `tmux-boot` sweeps the stale worktree ones, and WezTerm reopens a tab per session when it starts (add it to Login Items to have it open by itself) |
-| **Agents** | resurrect replays each allowlisted pane's command verbatim; a pane started with `claude -c` comes back continuing. Add agents to `@resurrect-processes` in `tmux/tmux.conf`, e.g. `'"~claude" "~aider"'` |
-| **Manual** | `Ctrl-a Ctrl-s` save · `Ctrl-a Ctrl-r` restore |
+| **Closed window / detach** | nothing stops: the Herdr server owns the processes, and reopening WezTerm reattaches |
+| **Server restart or reboot** | opening WezTerm starts the server, which restores workspaces, tabs, panes, their directories and layout; other running programs (dev servers, watchers) don't survive and need restarting |
+| **Screen contents** | recent pane history comes back too (`pane_history`, experimental, on in `herdr/config.toml`) |
+| **Agents** | Claude Code conversations resume through `herdr integration install claude`; other agents need their own integration (`herdr integration status`) |
+| **At login** | nothing runs by itself: add WezTerm to Login Items to have the workspace open at login |
 
 ---
 
 ## Customizing
 
-- **Workspace root.** Defaults to `~/Workspace`. Set `WORKSPACE_DIR` in
-  `~/.zshenv`, not `~/.zshrc`: the picker runs under WezTerm and `tmux-boot`
-  under launchd, and neither reads `.zshrc`. Or edit the default in
-  `bin/wt`, `bin/wezterm-project-picker`, and `bin/tmux-boot`.
-- **Swap the agent.** Change the command in your repos' `.session-setup`,
-  and update the allowlist in `tmux/tmux.conf`.
-- **Theme / font / keys.** `wezterm/wezterm.lua` and `tmux/tmux.conf` are
-  the live configs (symlinked), so edit in place and commit.
+- **Herdr.** `herdr/config.toml` holds the overrides; `herdr --default-config`
+  prints every option. `herdr config check` validates, and
+  `herdr server reload-config` applies edits to the running server. Herdr's
+  settings screen (`Ctrl-a s`) writes to this same file.
+- **Workspace root.** Defaults to `~/Workspace`: change `[worktrees]
+  directory` in `herdr/config.toml`, and set `WORKSPACE_DIR` in
+  `~/.zshenv` for `wt`.
+- **Theme / font.** `wezterm/wezterm.lua` for the window, `[theme]` in
+  `herdr/config.toml` for Herdr's UI.
 
 ---
 
@@ -229,34 +205,32 @@ skips that skill.
 
 | Repo file | Symlinked to | What it is |
 |---|---|---|
-| `wezterm/wezterm.lua` | `~/.wezterm.lua` | WezTerm: theme, tab-per-session restore, bell-to-toast notifications, Cmd-click links |
-| `tmux/tmux.conf` | `~/.tmux.conf` | tmux: `Ctrl-a` prefix, status bar, TPM + resurrect + continuum |
-| `bin/wezterm-project-picker` | `~/.local/bin/wezterm-project-picker` | fzf new-tab menu: attach/create sessions & worktrees |
-| `bin/wt` | `~/.local/bin/wt` | worktree workflow CLI (`new/open/done/gc/ls`) |
-| `bin/tmux-boot` | `~/.local/bin/tmux-boot` | headless tmux restore at login (run by the launchd agent) |
-| `bin/tmux-snapshot` | `~/.local/bin/tmux-snapshot` | debounced single-writer resurrect save (fired by tmux hooks on session create/close, tab detach) |
+| `wezterm/wezterm.lua` | `~/.wezterm.lua` | WezTerm: theme, every window runs Herdr, Cmd-T plain shell, Cmd-click links, smart Cmd-V |
+| `herdr/config.toml` | `~/.config/herdr/config.toml` | Herdr: `Ctrl-a` prefix, worktree dir, theme, silent notifications, pane history |
+| `bin/wt` | `~/.local/bin/wt` | `wt gc`: sweep merged worktrees |
 | `claude/statusline.sh` | `~/.claude/statusline.sh` | Claude Code status line (opt-in: point Claude's `statusLine` setting at it) |
 | `.agents/skills/<name>/` | `~/.claude/skills/<name>`, `~/.agents/skills/<name>` | agent skills, linked per skill; add via `npx skills add` |
-| `skills-lock.json` | — | source and content-hash pins for skills installed via `npx skills` (written by it; absent until the first skill) |
-| `macos/dev.dotfiles.tmux-boot.plist` | `~/Library/LaunchAgents/…` | login agent (rendered + loaded by `install.sh`) |
-| `install.sh` | — | symlinks everything + installs the login agent; idempotent |
+| `skills-lock.json` | — | source and content-hash pins for skills installed via `npx skills` (written by it) |
+| `install.sh` | — | symlinks everything; idempotent |
 
 ---
 
 ## Notes & troubleshooting
 
-- The live files (`~/.tmux.conf`, `~/.wezterm.lua`, and friends) are
-  symlinks into this repo, so editing them edits the repo. `git status` here
-  shows your drift; commit as you go.
+- The live files (`~/.wezterm.lua`, `~/.config/herdr/config.toml`, and
+  friends) are symlinks into this repo, so editing them edits the repo.
+  `git status` here shows your drift; commit as you go.
 - If an app ever replaces a symlink with a real file, re-run `install.sh`:
   it moves the file to `<name>.bak` (timestamped if that exists) and restores
   the link. Diff the backup against the repo and commit what you want to
   keep.
-- **The picker is empty?** It lists directories directly under
-  `$WORKSPACE_DIR` (default `~/Workspace`); clone your project repos there.
-- **Sessions don't come back after a reboot?** Make sure the plugins
-  installed (re-run `install.sh`, or `Ctrl-a I` inside tmux) and that a
-  session was saved at least once. Saves fire automatically on session
-  create/close and tab detach; force one with `Ctrl-a Ctrl-s`. Snapshots
-  live in resurrect's default dir: `~/.tmux/resurrect` if it exists, else
-  `~/.local/share/tmux/resurrect`.
+- **An agent shows the wrong state (or `unknown`)?** `herdr agent explain
+  <pane> --json` shows why Herdr classified it that way. Codex's finished
+  state isn't recognized as of Herdr 0.9.3 / Codex 0.159, so it stays
+  `unknown` between turns.
+- **Something off at startup?** If new windows close right away, Herdr failed
+  to start. Press Cmd-T in any open window for a plain shell (with none
+  left, run `/Applications/WezTerm.app/Contents/MacOS/wezterm start --
+  /bin/zsh -l` from Terminal.app), and run `herdr` there to see the error.
+  `herdr status` summarizes client and server; logs live in
+  `~/.config/herdr/`.

@@ -1,21 +1,15 @@
 #!/bin/zsh
-# wt — git worktrees as first-class tmux sessions.
-# One task = one worktree = one branch = one session, stored centrally under
-# $WORKSPACE_DIR/.worktrees/<repo>/<branch-slug>. Agent-agnostic: a new session
-# opens a plain split layout; an executable .session-setup in the worktree
-# launches an agent (e.g. `claude -c`) or any custom layout — see ensure_session.
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH:/Applications/WezTerm.app/Contents/MacOS"
+# wt — sweep git worktrees whose work has landed. Creating and opening
+# worktrees is Herdr's job (`herdr worktree create`, prefix+shift+g), and it
+# stores them where this looks: $WORKSPACE_DIR/.worktrees/<repo>/<branch-slug>
+# (herdr/config.toml sets [worktrees] directory to match). The one thing Herdr
+# lacks is "remove the ones that merged", which is all that's left here.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
 
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/Workspace}"
 STORE="$WORKSPACE_DIR/.worktrees"
 
 die() { print -u2 "wt: $*"; exit 1 }
-
-# branch name -> directory/session-safe slug (tmux forbids . and : in names)
-slug() { print -r -- "$1" | sed -E 's/[^A-Za-z0-9_-]+/-/g; s/^-+//; s/-+$//' }
-
-# the picker's session-name rule for the repo part
-munge() { print -r -- "$1" | tr '.:' '__' }
 
 # Primary clone path — correct even when asked from inside another worktree
 # (--show-toplevel would return the worktree itself)
@@ -35,105 +29,14 @@ base_branch() {
   return 1
 }
 
-# wezterm with the inherited WEZTERM_* stripped: inside tmux those are baked
-# in at server start, and a stale socket/pane id makes every cli call fail.
-# Unset, the cli auto-discovers the running GUI's socket.
-wz() { env -u WEZTERM_UNIX_SOCKET -u WEZTERM_PANE wezterm "$@" }
-
-# Snapshot refresh is NOT wt's job: tmux's session-created/session-closed
-# hooks (tmux.conf) fire on every new-session/kill-session below and funnel
-# into bin/tmux-snapshot, the single debounced writer. The hooks run on the
-# server, which outlives its last session (exit-empty off), so a `wt done`
-# of the final task still gets its save — no detached watchers needed here.
-
-# Open the session as a new WezTerm tab, aimed at the focused window (the
-# baked-in WEZTERM_PANE can't be trusted for "current"). Absolute tmux path
-# is required: the spawn execs in the GUI mux server's environment, whose
-# PATH lacks homebrew (same reason wezterm.lua uses the absolute path).
-spawn_tab() {
-  local p wid pane_id
-  p=$(wz cli list-clients --format json 2>/dev/null | jq -r '.[0].focused_pane_id' 2>/dev/null)
-  wid=$(wz cli list --format json 2>/dev/null |
-        jq -r --argjson p "${p:-null}" '([.[]|select(.pane_id==$p)][0] // .[0]).window_id' 2>/dev/null)
-  if [ -n "$wid" ] && [ "$wid" != "null" ]; then
-    # the tab is open once spawn succeeds; a failed title is cosmetic
-    if pane_id=$(wz cli spawn --window-id "$wid" -- /opt/homebrew/bin/tmux new-session -A -s "$1" 2>/dev/null); then
-      wz cli set-tab-title --pane-id "$pane_id" "$1" 2>/dev/null
-      return 0
-    fi
-  fi
-  print -u2 "wt: couldn't open a WezTerm tab; attach with: tmux attach -t '=$1'"
-}
-
-# Create the session (detached) unless it exists. WT_* metadata rides the
-# session environment (-e: applied to every pane spawned in the session), so a
-# .session-setup can read WT_REPO/WT_BRANCH/etc. An executable .session-setup in
-# the worktree owns layout AND any agent launch; otherwise just a plain split
-# (agent launch is a .session-setup concern, not wt's).
-ensure_session() {
-  local session=$1 dir=$2 repo=$3 branch=$4 base=$5
-  tmux has-session -t "=$session" 2>/dev/null && return 0
-  # No server yet (bare terminal, or it died mid-day): boot through tmux-boot
-  # so continuum's restore lands before we create anything — the restored set
-  # may even include this very session.
-  if ! tmux list-sessions >/dev/null 2>&1; then
-    tmux-boot >/dev/null 2>&1
-    tmux has-session -t "=$session" 2>/dev/null && return 0
-  fi
-  tmux new-session -d -s "$session" -c "$dir" \
-    -e "WT_REPO=$repo" -e "WT_BRANCH=$branch" \
-    -e "WT_BASE_BRANCH=$base" -e "WT_WORKTREE_PATH=$dir" || return 1
-  # (qq): single-quote the path — send-keys types this line into the pane's
-  # interactive shell, where a bare ' would hang at a continuation prompt and
-  # a bare ! trips history expansion ((q) leaves ! unescaped)
-  if [ -x "$dir/.session-setup" ]; then
-    tmux send-keys -t "=$session:" "${(qq)dir}/.session-setup" Enter
-  else
-    # -d keeps focus on the first pane, whatever pane-base-index is
-    tmux split-window -d -h -l 30% -t "=$session:" -c "$dir"
-  fi
-  return 0
-}
-
-# --no-attach: print the session name and stop (the picker attaches itself,
-# keeping errors readable in its tab). Inside tmux/WezTerm: a new tab, so
-# one-tab-one-session holds. Bare terminal: attach in place.
-open_session() {
-  local session=$1
-  if [ -n "$NO_ATTACH" ]; then
-    print -r -- "$session"
-  elif [ -n "$TMUX" ] || [ -n "$WEZTERM_PANE" ]; then
-    spawn_tab "$session"
-  else
-    exec tmux attach -t "=$session"
-  fi
-}
-
-# .worktreeinclude: gitignore-syntax patterns SELECTING untracked/ignored
-# files to copy into a fresh worktree (.env and friends). Tracked files
-# arrive via checkout; of the rest, only files that are ALSO gitignored
-# qualify (zsh ${a:*b} intersection) — a copied untracked-but-not-ignored
-# file would leave the worktree permanently dirty to done/gc.
-copy_include() {
-  local root=$1 dest=$2 f
-  local -a inc ign
-  [ -f "$root/.worktreeinclude" ] || return 0
-  inc=( ${(0)"$(git -C "$root" ls-files -z --others --ignored --exclude-from="$root/.worktreeinclude" 2>/dev/null)"} )
-  ign=( ${(0)"$(git -C "$root" ls-files -z --others --ignored --exclude-standard 2>/dev/null)"} )
-  for f in ${inc:*ign}; do
-    mkdir -p "$dest/${f:h}"
-    cp -p "$root/$f" "$dest/$f"
-  done
-}
-
 # Has this branch's work landed on the base? Three detectors, all failing
-# safe toward "keep". $5 = skip-gh (used by ls: no network per row).
+# safe toward "keep".
 is_landed() {
-  local wt_path=$1 branch=$2 base=$3 root=$4 skip_gh=$5 upstream pr tip mb synth
+  local wt_path=$1 branch=$2 base=$3 root=$4 upstream pr tip mb synth
   # Detached worktrees pass an empty branch; a bare HEAD in the -C "$root"
   # checks below would resolve in the PRIMARY clone (usually sitting on the
   # base branch) and pass trivially — destroying unmerged commits. Detached
-  # state is unverifiable here: never "landed", --force remains the override.
+  # state is unverifiable here: never "landed".
   [ -n "$branch" ] || return 1
   # refs/heads/ spelled out: a same-named tag would otherwise win resolution
   local ref="refs/heads/$branch"
@@ -145,7 +48,7 @@ is_landed() {
   # (a) a merged PR for this exact tip. The OID equality guard matters:
   # branch names get reused, and gh returns the most recent PR for a head
   # branch *including old merged ones* — without it gc would eat fresh work.
-  if [ -z "$skip_gh" ] && command -v gh >/dev/null 2>&1; then
+  if command -v gh >/dev/null 2>&1; then
     pr=$(cd "$wt_path" 2>/dev/null && gh pr view "$branch" --json state,headRefOid \
          --jq '.state + " " + .headRefOid' 2>/dev/null)
     tip=$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)
@@ -161,13 +64,37 @@ is_landed() {
   [ "$(git -C "$root" cherry "$upstream" "$synth" 2>/dev/null)" = "- $synth" ]
 }
 
-# Remove worktree + branch + session. Every git op is anchored to the
-# primary root with absolute paths: `worktree remove` happily deletes the
-# directory this script is standing in, and any bare git command afterwards
-# dies on the deleted cwd. kill-session goes strictly last — when run from
-# inside the doomed session it kills this very script.
+# Print the id of the Herdr workspace that has this worktree open; print
+# nothing when none does, Herdr isn't installed, or no server is running.
+# Fails closed: any other trouble asking Herdr returns non-zero, so the
+# caller skips the worktree instead of deleting a checkout that may be open.
+# Herdr reports git's resolved paths, hence :A on ours.
+herdr_workspace() {
+  local wt_path=${1:A} root=$2 out
+  command -v herdr >/dev/null 2>&1 || return 0
+  if out=$(herdr worktree list --cwd "$root" 2>&1); then
+    print -r -- "$out" | jq -er --arg p "$wt_path" '
+      .result.worktrees | if type == "array" then . else error("no worktree list") end
+      | map(select(.path == $p))[0].open_workspace_id // ""' 2>/dev/null
+  else
+    print -r -- "$out" | jq -e '.error.code == "server_not_running"' >/dev/null 2>&1
+  fi
+}
+
+# A workspace's sidebar label, for messages (falls back to the id)
+workspace_label() {
+  local label
+  label=$(herdr workspace list 2>/dev/null |
+    jq -r --arg id "$1" '.result.workspaces[]? | select(.workspace_id == $id) | .label' 2>/dev/null)
+  print -r -- "${label:-$1}"
+}
+
+# Remove worktree + branch (+ its Herdr workspace). Every git op is anchored
+# to the primary root with absolute paths: `worktree remove` happily deletes
+# the directory this script is standing in, and any bare git command
+# afterwards dies on the deleted cwd.
 teardown() {
-  local wt_path=$1 force=$2 root repo s session branch
+  local wt_path=$1 root repo s branch ws err
   case "$wt_path" in
     "$STORE"/*/*) ;;
     *) die "refusing: $wt_path is not under $STORE" ;;
@@ -175,12 +102,31 @@ teardown() {
   root=$(primary_root "$wt_path") || die "not a git worktree: $wt_path"
   [ "$root" = "$wt_path" ] && die "refusing to remove a primary clone"
   s=${wt_path:t}; repo=${wt_path:h:t}
-  session="$(munge "$repo")--$s"
   branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)   # empty if detached: nothing to delete
 
-  git -C "$root" worktree remove ${force:+--force} "$wt_path" || return 1
+  if ! ws=$(herdr_workspace "$wt_path" "$root"); then
+    print -u2 "wt: skip $repo/$s: couldn't ask Herdr whether it's open"
+    return 1
+  fi
+  if [ -n "$ws" ]; then
+    # closing the workspace we're running in would kill this very script
+    if [ "$ws" = "${HERDR_WORKSPACE_ID:-}" ]; then
+      print -u2 "wt: skip $repo/$s: this shell is inside it; run gc from another workspace"
+      return 1
+    fi
+    # Removes the checkout and closes its workspace; the branch stays. Herdr
+    # only does this for workspaces it created as worktrees, and refuses one
+    # that merely has a shell cd'd in here: leave that for the user to close.
+    if ! err=$(herdr worktree remove --workspace "$ws" 2>&1 >/dev/null); then
+      err=$(print -r -- "$err" | jq -r '.error.message // empty' 2>/dev/null)
+      print -u2 "wt: skip $repo/$s: open in Herdr workspace \"$(workspace_label "$ws")\"${err:+ ($err)}; close it, then re-run"
+      return 1
+    fi
+  else
+    git -C "$root" worktree remove "$wt_path" || return 1
+  fi
   if [ -n "$branch" ]; then
-    # -D is only reached when landed/forced (squash merges aren't ancestors,
+    # -D is only reached when landed (squash merges aren't ancestors,
     # so -d refuses them even though the work is upstream)
     git -C "$root" branch -d "$branch" 2>/dev/null ||
       git -C "$root" branch -D "$branch" ||
@@ -188,203 +134,7 @@ teardown() {
   fi
   rmdir "$STORE/$repo" "$STORE" 2>/dev/null
   print -r -- "removed $repo/$s"
-  tmux kill-session -t "=$session" 2>/dev/null
   return 0
-}
-
-# Map "repo/slug" or the session form "repo--slug" to a store path. Session
-# names munge dots/colons, so compare munged forms against real store dirs.
-# Slugs may themselves contain "--", so the session form can be ambiguous
-# (foo--bar--baz: repo foo slug bar--baz, or repo foo--bar slug baz) —
-# refuse to guess; the repo/slug form is always unique.
-resolve_target() {
-  local target=$1 d found=''
-  for d in "$STORE"/*/*(/N); do
-    if [ "${d:h:t}/${d:t}" = "$target" ] || [ "$(munge "${d:h:t}")--${d:t}" = "$target" ]; then
-      if [ -n "$found" ]; then
-        print -u2 "wt: '$target' is ambiguous (${found:h:t}/${found:t} vs ${d:h:t}/${d:t}) — use the repo/slug form"
-        return 1
-      fi
-      found=$d
-    fi
-  done
-  [ -n "$found" ] || return 1
-  print -r -- "$found"
-}
-
-cmd_new() {
-  local branch='' from='' use_current='' repo_dir=$PWD
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      # arity check: zsh's `shift 2` on a lone trailing flag fails WITHOUT
-      # shifting, which would spin this loop forever
-      --from|--repo) [ $# -ge 2 ] || die "$1 needs a value"
-        if [ "$1" = --from ]; then from=$2; else repo_dir=$2; fi
-        shift 2 ;;
-      --current) use_current=1; shift ;;
-      --no-attach) NO_ATTACH=1; shift ;;
-      -*) die "unknown flag for new: $1" ;;
-      *) [ -n "$branch" ] && die "unexpected argument: $1"; branch=$1; shift ;;
-    esac
-  done
-  [ -n "$branch" ] || die "usage: wt new <branch> [--from <base>] [--current] [--repo <dir>]"
-  # Reject anything git wouldn't take as a branch name before it can do harm:
-  # $branch is free-typed picker input and lands in a fetch refspec below,
-  # where a stray ':' or '+' would mutate arbitrary local refs as a side
-  # effect. Also rejects "HEAD" and leading '-'.
-  git check-ref-format --branch "$branch" >/dev/null 2>&1 ||
-    die "invalid branch name: $branch"
-
-  local root repo s wt_path session base
-  root=$(primary_root "$repo_dir") || die "not a git repo: $repo_dir"
-  repo=${root:t}
-  s=$(slug "$branch")
-  [ -n "$s" ] || die "branch '$branch' yields an empty slug"
-  wt_path="$STORE/$repo/$s"
-  session="$(munge "$repo")--$s"
-
-  [ -e "$wt_path" ] && die "worktree exists — wt open $repo $s"
-  tmux has-session -t "=$session" 2>/dev/null && die "session $session already exists"
-
-  if [ -n "$use_current" ]; then
-    base=$(git -C "$repo_dir" branch --show-current)
-    [ -n "$base" ] || base=$(git -C "$repo_dir" rev-parse --short HEAD)   # detached
-  elif [ -n "$from" ]; then
-    base=$from
-  else
-    base=$(base_branch "$root") || die "can't detect a base branch; use --from <base>"
-  fi
-  git -C "$root" fetch --quiet origin "$base" 2>/dev/null
-
-  # Branch from fresh origin state when tracking exists: the fetch above
-  # only updates origin/<base>, so a bare "<base>" would fork from the stale
-  # local ref. --from stays literal (the user asked for exactly that state)
-  # unless it only exists as origin/<from>; --current is the checkout's HEAD.
-  # Resolved to a commit in the new-branch arm below.
-  local start=$base
-  if [ -n "$use_current" ]; then
-    start=$(git -C "$repo_dir" rev-parse HEAD)
-  elif [ -z "$from" ] || ! git -C "$root" show-ref -q --verify "refs/heads/$base"; then
-    git -C "$root" show-ref -q --verify "refs/remotes/origin/$base" && start="origin/$base"
-  fi
-
-  # Freshen/discover the branch on origin — skipped when it already exists
-  # locally (attach uses local state either way). The explicit refspec, not a
-  # bare name: narrow-refspec clones (--single-branch / --depth) would update
-  # only FETCH_HEAD and never create origin/<branch>, silently steering the
-  # remote arm below wrong. Quietly tolerates offline and no-such-branch,
-  # like the base fetch. (A branch deleted server-side keeps its stale
-  # origin/<branch> here — indistinguishable from being offline — so the
-  # remote arm may attach to the stale ref: accepted.)
-  # (${branch}, braced: an unbraced $branch: would eat ':r' as a zsh
-  # csh-style modifier and silently mangle the refspec)
-  git -C "$root" show-ref -q --verify "refs/heads/$branch" ||
-    git -C "$root" fetch --quiet origin \
-      "+refs/heads/${branch}:refs/remotes/origin/$branch" 2>/dev/null
-
-  # git chatter ("HEAD is now at …") goes to stderr: stdout is reserved for
-  # the session name — the picker captures it via $(wt new --no-attach …).
-  # No mkdir: worktree add creates parent dirs, and a failed add leaves none.
-  # Prune first: a worktree dir deleted by hand stays registered, and git
-  # refuses to add at a "missing but already registered" path.
-  git -C "$root" worktree prune 2>/dev/null
-  if git -C "$root" show-ref -q --verify "refs/heads/$branch"; then
-    # existing branch: attach a worktree to it (git refuses if it's already
-    # checked out elsewhere — surface its error as-is)
-    git -C "$root" worktree add "$wt_path" "$branch" 1>&2 || exit 1
-  elif git -C "$root" show-ref -q --verify "refs/remotes/origin/$branch"; then
-    # remote-only branch: local branch off it, not checkout DWIM. (Without
-    # this arm the fallthrough would silently mint a NEW "$branch" off
-    # "$start", shadowing the remote branch of the same name.) An explicit
-    # base contradicts attaching — refuse rather than guess.
-    if [ -n "$from" ] || [ -n "$use_current" ]; then
-      die "'$branch' exists on origin — drop --from/--current to attach it, or pick another name"
-    fi
-    git -C "$root" worktree add -b "$branch" "$wt_path" "origin/$branch" 1>&2 || exit 1
-    # upstream best-effort, separately: an explicit --track on the add would
-    # hard-fail in narrow-refspec clones (--single-branch/--depth), where
-    # origin/<branch> can't be mapped back through remote.origin.fetch. There
-    # the branch still lands on the right tip, just without upstream; normal
-    # clones get tracking from autosetup or from this call.
-    git -C "$root" branch --set-upstream-to "origin/$branch" "$branch" >/dev/null 2>&1
-  else
-    # start as a bare commit id, never a name: given a name that exists only
-    # as origin/<name>, `worktree add -b` DWIMs into checking out <name>
-    # itself (ignoring -b); from a remote-tracking ref it would set upstream
-    # to origin/<base>, breaking a plain `git push` under push.default=simple
-    start=$(git -C "$root" rev-parse --verify -q "$start^{commit}") ||
-      die "unknown start point: $base"
-    git -C "$root" worktree add -b "$branch" "$wt_path" "$start" 1>&2 || exit 1
-  fi
-
-  copy_include "$root" "$wt_path"
-  ensure_session "$session" "$wt_path" "$repo" "$branch" "$base" || die "couldn't create session $session"
-  open_session "$session"
-}
-
-cmd_open() {
-  local repo='' s=''
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --no-attach) NO_ATTACH=1; shift ;;
-      -*) die "unknown flag for open: $1" ;;
-      *)
-        if [ -z "$repo" ]; then repo=$1
-        elif [ -z "$s" ]; then s=$1
-        else die "unexpected argument: $1"; fi
-        shift ;;
-    esac
-  done
-  { [ -n "$repo" ] && [ -n "$s" ] } || die "usage: wt open <repo> <branch-slug>"
-
-  local wt_path="$STORE/$repo/$s" session branch base
-  [ -d "$wt_path" ] || die "no worktree at $wt_path"
-  session="$(munge "$repo")--$s"
-  if ! tmux has-session -t "=$session" 2>/dev/null; then
-    branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)
-    [ -n "$branch" ] || branch=$s   # detached HEAD: display-only fallback
-    base=$(base_branch "$wt_path") || base=''   # original fork point is gone; best effort
-    ensure_session "$session" "$wt_path" "$repo" "$branch" "$base" || die "couldn't create session $session"
-  fi
-  open_session "$session"
-}
-
-cmd_done() {
-  local force='' target='' wt_path repo s root branch base
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --force) force=1; shift ;;
-      -*) die "unknown flag for done: $1" ;;
-      *) [ -n "$target" ] && die "unexpected argument: $1"; target=$1; shift ;;
-    esac
-  done
-
-  if [ -n "$target" ]; then
-    wt_path=$(resolve_target "$target") || die "no managed worktree matches '$target'"
-  else
-    case "$PWD" in
-      "$STORE"/*/*)
-        local rel=${PWD#$STORE/}
-        wt_path="$STORE/${rel%%/*}/${${rel#*/}%%/*}" ;;
-      *) die "not inside a managed worktree; usage: wt done <repo>/<slug>" ;;
-    esac
-  fi
-  [ -d "$wt_path" ] || die "no worktree at $wt_path"
-  repo=${wt_path:h:t}; s=${wt_path:t}
-
-  if [ -z "$force" ]; then
-    [ -z "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ] ||
-      die "$repo/$s has uncommitted changes (--force to override)"
-    root=$(primary_root "$wt_path") || die "not a git worktree: $wt_path"
-    branch=$(git -C "$wt_path" branch --show-current 2>/dev/null)
-    base=$(base_branch "$root") || die "can't detect a base branch to check merges against (--force to override)"
-    # unlike gc, done may run long after the last fetch: a squash merge is
-    # invisible to (b)/(c) until origin/<base> catches up
-    git -C "$root" fetch --quiet origin 2>/dev/null
-    is_landed "$wt_path" "$branch" "$base" "$root" ||
-      die "$repo/$s (${branch:-detached}) doesn't look merged (--force to override)"
-  fi
-  teardown "$wt_path" "$force"
 }
 
 cmd_gc() {
@@ -420,11 +170,11 @@ cmd_gc() {
     if [ -n "$dry" ]; then
       print "would remove   ${d:h:t}/${d:t} ($branch, merged)"
     elif [ -n "$all" ]; then
-      teardown "$d" ''
+      teardown "$d"
     else
       if read -q "?remove ${d:h:t}/${d:t} ($branch, merged)? [y/N] "; then
         print
-        teardown "$d" ''
+        teardown "$d"
       else
         print
       fi
@@ -432,56 +182,23 @@ cmd_gc() {
   done
 }
 
-cmd_ls() {
-  local d session mark branch merged root base
-  for d in "$STORE"/*/*(/N); do
-    session="$(munge "${d:h:t}")--${d:t}"
-    if tmux has-session -t "=$session" 2>/dev/null; then mark="●"; else mark="⌥"; fi
-    branch=$(git -C "$d" branch --show-current 2>/dev/null) || branch='?'
-    merged=''
-    # tiers b+c only: a gh network call per row would make ls sluggish
-    if root=$(primary_root "$d") && base=$(base_branch "$root"); then
-      is_landed "$d" "$branch" "$base" "$root" skip-gh && merged='merged'
-    fi
-    printf '%s %-36s %-24s %s\n' "$mark" "${d:h:t}/${d:t}" "${branch:-(detached)}" "$merged"
-  done
-}
-
 usage() {
   cat <<EOF
-wt — git worktrees as tmux sessions ($STORE/<repo>/<slug>)
+wt — sweep merged worktrees under $STORE/<repo>/<slug>
 
-  wt new <branch> [--from <base>] [--current] [--repo <dir>] [--no-attach]
-                       create branch + worktree + session (base: origin/HEAD);
-                       an existing local or origin branch is attached as-is
-  wt open <repo> <slug> [--no-attach]
-                       attach-or-create the session for an existing worktree
-                       (--no-attach: print the session name only — picker plumbing)
-  wt done [name] [--force]
-                       remove worktree + branch + session; refuses dirty or
-                       unmerged work unless --force. name: repo/slug or
-                       repo--slug; no name = the worktree you're in
-  wt gc [--dry-run|--all]  sweep worktrees whose work landed on the base
-                       (merged PR / ancestry / squash detection); dirty ones
-                       are never touched
-  wt ls                list worktrees: ● session live / ⌥ orphaned, merged?
+  wt gc [--dry-run|--all]  remove worktrees whose work landed on the base
+                       branch (merged PR / ancestry / squash detection),
+                       with their branch and any Herdr workspace showing
+                       them; asks per worktree unless --all. Dirty ones are
+                       never touched.
   wt help              this text
 
-Sessions are named <repo>--<slug> and open with a plain split layout. An
-executable .session-setup in the worktree launches an agent (e.g. \`claude -c\`)
-or sets up any custom layout — agent launch is a .session-setup concern, not
-wt's. A .worktreeinclude file (gitignore syntax) in the repo selects untracked
-files to copy into fresh worktrees (.env etc).
+Create and open worktrees with Herdr: \`herdr worktree create\` or prefix+shift+g.
 EOF
 }
 
-NO_ATTACH=''
 case "$1" in
-  new)  shift; cmd_new "$@" ;;
-  open) shift; cmd_open "$@" ;;
-  done) shift; cmd_done "$@" ;;
   gc)   shift; cmd_gc "$@" ;;
-  ls)   shift; cmd_ls "$@" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 1 ;;
 esac

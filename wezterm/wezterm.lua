@@ -1,6 +1,10 @@
 local wezterm = require 'wezterm'
 local config = wezterm.config_builder()
 
+-- WezTerm is just the window: every window attaches to the one Herdr
+-- session, and Herdr owns workspaces, tabs, panes, agent status,
+-- notifications, and persistence (see herdr/config.toml).
+
 -- Appearance
 config.color_scheme = 'rose-pine-moon'
 config.font = wezterm.font 'JetBrains Mono'
@@ -15,13 +19,13 @@ config.window_padding = {
   bottom = 8,
 }
 
--- Keep the tab bar visible even with one tab: the bell highlight renders
--- in the tab bar, and hiding it made single-tab alerts invisible
-config.hide_tab_bar_if_only_one_tab = false
+-- Herdr has its own tabs and sidebar; a WezTerm tab bar only appears in the
+-- rare case of a second WezTerm tab
+config.hide_tab_bar_if_only_one_tab = true
 
 -- Fancy tab bar in rose-pine-moon colors: quiet text-only tabs — active
--- is bold gold text (mirroring the tmux bar's active window), no fills
--- (the built-in scheme doesn't style the tab bar, so set explicitly)
+-- is bold gold text, no fills (the built-in scheme doesn't style the tab
+-- bar, so set explicitly)
 config.use_fancy_tab_bar = true
 -- No per-tab close buttons (their color inherits from title formatting and
 -- shifts around; Cmd+W closes tabs anyway). Not possible per-tab.
@@ -42,8 +46,7 @@ config.colors = {
   },
 }
 
--- Dim inactive panes (native WezTerm splits only; tmux panes get their
--- own dimming via window-style — see ~/.tmux.conf)
+-- Dim inactive panes (native WezTerm splits only; Herdr draws its own panes)
 config.inactive_pane_hsb = {
   saturation = 0.8,
   brightness = 0.7,
@@ -51,13 +54,13 @@ config.inactive_pane_hsb = {
 
 config.scrollback_lines = 100000
 
--- CMD+click to open links, working *through* tmux. With `mouse on`, tmux
--- keeps mouse reporting active, and WezTerm normally forwards clicks to the
+-- CMD+click to open links, working *through* Herdr. Herdr is mouse-first, so
+-- mouse reporting is always on, and WezTerm normally forwards clicks to the
 -- app instead of matching its own bindings — so the built-in CMD+click
 -- link-open only fires when reporting is off. `mouse_reporting = true` is the
--- key: it opts THESE bindings in precisely when reporting IS on (the tmux
--- case), without repurposing CMD as a global bypass modifier. Nop the Down
--- half so tmux never sees a stray click (cursor jump / copy-mode); open on Up.
+-- key: it opts THESE bindings in precisely when reporting IS on, without
+-- repurposing CMD as a global bypass modifier. Nop the Down half so Herdr
+-- never sees a stray click (focus change / selection); open on Up.
 -- (SHIFT still bypasses reporting for normal WezTerm text selection.)
 config.mouse_bindings = {
   {
@@ -100,115 +103,31 @@ config.keys = {
       end
     end),
   },
+  -- Cmd+T: a plain login shell outside Herdr (new windows still open Herdr).
+  -- The way in when Herdr itself won't start, and for quick one-offs.
+  {
+    key = 't',
+    mods = 'CMD',
+    action = wezterm.action.SpawnCommandInNewTab {
+      args = { os.getenv 'SHELL' or '/bin/zsh', '-l' },
+    },
+  },
 }
 
--- One tab = one project = one tmux session.
--- New tabs open a project picker that attaches/creates the right session.
-config.default_prog = { wezterm.home_dir .. '/.local/bin/wezterm-project-picker' }
+-- Every window and tab attaches to Herdr, which launches its server on first
+-- use and restores the saved workspaces after a restart. Spawned by WezTerm
+-- directly, never from inside another multiplexer, so Herdr's panes start
+-- with a clean environment. Absolute path: a GUI-launched WezTerm doesn't
+-- have Homebrew on its PATH.
+config.default_prog = { '/opt/homebrew/bin/herdr' }
 
--- On launch, reopen a tab for every tmux session. Delegates to bin/tmux-boot
--- (the same primitive the login LaunchAgent runs): it ensures the server is up,
--- waits for tmux-continuum's restore to settle, and prints the session list.
--- Calling it here — rather than a bare `tmux list-sessions` — closes the login
--- race: whether or not WezTerm auto-launches at boot, and whichever of WezTerm
--- vs. the agent starts first, this blocks until sessions have settled, so we
--- never build tabs from an empty or half-restored server. It's idempotent, so
--- overlapping with the agent is safe. (Cost: at most a few seconds' wait before
--- the window appears, and only when there is genuinely nothing to restore.)
-wezterm.on('gui-startup', function(cmd)
-  local mux = wezterm.mux
-  -- `wezterm start -- prog` passes an explicit command (nil on a plain
-  -- launch): honor it as-is instead of rebuilding the tmux tabs. Keyed on
-  -- args only, so a bare --cwd still gets the usual restore.
-  if cmd and cmd.args then
-    mux.spawn_window(cmd)
-    return
-  end
-  -- pcall: run_child_process RAISES if the binary is missing, and an
-  -- uncaught error here would leave WezTerm with no window at all
-  local called, ok, stdout = pcall(wezterm.run_child_process, {
-    wezterm.home_dir .. '/.local/bin/tmux-boot',
-  })
-  local window
-  if called and ok and stdout ~= '' then
-    for name in stdout:gmatch '[^\n]+' do
-      local args = { '/opt/homebrew/bin/tmux', 'new-session', '-A', '-s', name }
-      local tab, _
-      if not window then
-        tab, _, window = mux.spawn_window { args = args }
-      else
-        tab = window:spawn_tab { args = args }
-      end
-      -- explicit tab title: deterministic, immune to OSC title races
-      if tab then
-        tab:set_title(name)
-      end
-    end
-  else
-    mux.spawn_window {}
-  end
-end)
-
--- Silent notifications: no bell sound anywhere.
--- A bell (an agent finishing / needing attention, or any program) highlights
--- that tab; if WezTerm isn't focused, also show a silent macOS toast.
+-- Silent: no bell sound anywhere. Bells otherwise go unnoticed: agent alerts
+-- come from Herdr instead, which posts macOS notifications when an agent
+-- finishes or needs input.
 config.audible_bell = 'Disabled'
-
-wezterm.on('bell', function(window, pane)
-  local tab = pane:tab()
-  if tab then
-    local flags = wezterm.GLOBAL.bell_tabs or {}
-    flags[tostring(tab:tab_id())] = true
-    wezterm.GLOBAL.bell_tabs = flags
-  end
-  if not window:is_focused() then
-    -- a bell is a bell — could be any program, not just an agent
-    local where = tab and tab:get_title() or ''
-    if where == '' then
-      where = pane:get_title()
-    end
-    -- No timeout: on macOS persistence is the notification style, not this
-    -- call. System Settings → Notifications → WezTerm → "Alerts" keeps it up
-    -- until dismissed; "Banners" fades it. A timeout here withdraws it early.
-    window:toast_notification('WezTerm', 'Bell in ' .. where, nil)
-  end
-end)
-
--- Tab titles: numbered, truncated; a tab whose agent rang the bell turns
--- rose with a ● until visited (colors otherwise come from the scheme)
-wezterm.on('format-tab-title', function(tab)
-  -- prefer the explicit tab title (set by gui-startup/picker); fall back
-  -- to the pane's terminal title for tabs created any other way
-  local title = tab.tab_title
-  if #title == 0 then
-    title = tab.active_pane.title
-  end
-  -- columns, not bytes: #title over-counts non-ASCII names
-  if wezterm.column_width(title) > 24 then
-    title = wezterm.truncate_right(title, 23) .. '…'
-  end
-  title = (tab.tab_index + 1) .. ': ' .. title
-
-  local id = tostring(tab.tab_id)
-  local flags = wezterm.GLOBAL.bell_tabs or {}
-  if tab.is_active and flags[id] then
-    flags[id] = nil
-    wezterm.GLOBAL.bell_tabs = flags
-  end
-
-  if flags[id] then
-    -- alert = dot + brightened text (same color as tab hover), bg unchanged
-    return {
-      { Background = { Color = '#2a273f' } },
-      { Foreground = { Color = '#e0def4' } },
-      { Text = ' ● ' .. title .. ' ' },
-    }
-  end
-  return ' ' .. title .. ' '
-end)
 
 -- macOS niceties
 config.native_macos_fullscreen_mode = true
-config.window_close_confirmation = 'NeverPrompt' -- tmux keeps sessions alive anyway
+config.window_close_confirmation = 'NeverPrompt' -- Herdr keeps everything running anyway
 
 return config

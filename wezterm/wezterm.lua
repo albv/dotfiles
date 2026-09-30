@@ -54,6 +54,12 @@ config.inactive_pane_hsb = {
 
 config.scrollback_lines = 100000
 
+-- Kitty keyboard protocol: lets Cmd chords WezTerm doesn't bind itself reach
+-- Herdr (e.g. Cmd+R, see herdr/config.toml). Needs a WezTerm build with the
+-- June 2026 Esc fix (wezterm#7787); older ones drop quick Esc taps in Herdr
+-- (herdr#1266).
+config.enable_kitty_keyboard = true
+
 -- CMD+click to open links, working *through* Herdr. Herdr is mouse-first, so
 -- mouse reporting is always on, and WezTerm normally forwards clicks to the
 -- app instead of matching its own bindings — so the built-in CMD+click
@@ -103,14 +109,13 @@ config.keys = {
       end
     end),
   },
-  -- Cmd+R: toggle Herdr's reviewr diff pane. A terminal can't hand Cmd
-  -- chords to the app inside, so send ctrl+alt+r, which herdr/config.toml
-  -- binds to the toggle. Replaces WezTerm's reload-config (the config
-  -- reloads by itself on save anyway).
+  -- Cmd+R: free it from WezTerm's reload-config (the config reloads by
+  -- itself on save anyway) so it reaches Herdr, which binds it to the
+  -- reviewr diff pane
   {
     key = 'r',
     mods = 'CMD',
-    action = wezterm.action.SendKey { key = 'r', mods = 'CTRL|ALT' },
+    action = wezterm.action.DisableDefaultAssignment,
   },
   -- Cmd+T: a plain login shell outside Herdr (new windows still open Herdr).
   -- The way in when Herdr itself won't start, and for quick one-offs.

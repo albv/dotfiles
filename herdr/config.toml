@@ -16,10 +16,11 @@ name = "rose-pine"
 [keys]
 prefix = "ctrl+a"
 
-# Toggle the reviewr diff pane (plugin: persiyanov/herdr-reviewr). WezTerm
-# can't pass Cmd chords through, so its Cmd+R sends this ctrl+alt+r instead
+# Cmd+R toggles the reviewr diff pane (plugin: persiyanov/herdr-reviewr).
+# Cmd chords reach Herdr only because wezterm.lua turns on the kitty
+# keyboard protocol and leaves Cmd+R unbound
 [[keys.command]]
-key = "ctrl+alt+r"
+key = "cmd+r"
 type = "plugin_action"
 command = "persiyanov.reviewr.toggle"
 

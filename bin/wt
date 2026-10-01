@@ -4,7 +4,7 @@
 # stores them where this looks: $WORKSPACE_DIR/.worktrees/<repo>/<branch-slug>
 # (herdr/config.toml sets [worktrees] directory to match). The one thing Herdr
 # lacks is "remove the ones that merged", which is all that's left here.
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/Workspace}"
 STORE="$WORKSPACE_DIR/.worktrees"

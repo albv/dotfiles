@@ -44,7 +44,9 @@ work: one task, one worktree, one branch, one workspace.
 
 ## Requirements
 
-- macOS. The setup relies on Homebrew paths (`/opt/homebrew`) and macOS
+- macOS. WezTerm detects Herdr in the Apple Silicon (`/opt/homebrew`) or
+  Intel (`/usr/local`) Homebrew location, or the official installer's default
+  (`~/.local/bin`), then falls back to `PATH`. The setup also relies on macOS
   notifications.
 - Homebrew, and a zsh login shell (the macOS default).
 
@@ -55,8 +57,9 @@ work: one task, one worktree, one branch, one workspace.
 ```sh
 # 1: terminal + tools
 brew install --cask wezterm@nightly
-brew install herdr jq
-brew install gh          # optional: better merged-PR detection in `wt gc`
+curl -fsSL https://herdr.dev/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # Herdr now, and `wt` after linking
+command -v jq >/dev/null || brew install jq
 
 # 2: clone this repo anywhere, then run the installer
 git clone <this-repo> ~/dotfiles
@@ -72,8 +75,25 @@ herdr plugin install persiyanov/herdr-reviewr
 Add this to `~/.zshrc` if it isn't already present, then open a new shell:
 
 ```sh
-export PATH="$HOME/.local/bin:$PATH"   # for `wt`
+export PATH="$HOME/.local/bin:$PATH"   # for Herdr and `wt`
 ```
+
+The [official Herdr installer](https://herdr.dev/docs/install/) downloads a
+prebuilt binary for either Intel or Apple Silicon into `~/.local/bin` and
+verifies its checksum. Update this install with `herdr update`. On Apple
+Silicon, `brew install herdr` is also an option; update that install with
+`brew upgrade herdr`. WezTerm checks the Homebrew locations first if both
+install methods are present.
+
+On Intel Macs, Homebrew [no longer builds new bottles](https://docs.brew.sh/Support-Tiers#future-macos-support),
+so installing Herdr through it can build Rust, Zig, LLVM, and their dependencies
+from source. Use the official installer to avoid those builds. The setup can
+use macOS's bundled `jq`; the command above installs it only when missing.
+
+`gh` is optional: it improves merged-PR detection in `wt gc`. On Apple Silicon,
+install it with `brew install gh`; on Intel, use a prebuilt macOS amd64 binary
+from [GitHub CLI releases](https://github.com/cli/cli/releases) to avoid building Go.
+Without `gh`, `wt gc` still checks Git ancestry and squash merges.
 
 Then put your projects under the workspace root and launch:
 
@@ -243,3 +263,7 @@ the diff".
   /bin/zsh -l` from Terminal.app), and run `herdr` there to see the error.
   `herdr status` summarizes client and server; logs live in
   `~/.config/herdr/`.
+- **WezTerm cannot find Herdr after installing it?** Executable detection runs
+  when the config loads. If WezTerm was already running before installation,
+  press Ctrl-Shift-R to reload its config, or quit and reopen it. New windows
+  will then use the detected absolute path; Cmd-R still toggles reviewr.

@@ -132,8 +132,22 @@ config.keys = {
 -- use and restores the saved workspaces after a restart. Spawned by WezTerm
 -- directly, never from inside another multiplexer, so Herdr's panes start
 -- with a clean environment. Absolute path: a GUI-launched WezTerm doesn't
--- have Homebrew on its PATH.
-config.default_prog = { '/opt/homebrew/bin/herdr' }
+-- have Homebrew or ~/.local/bin on its PATH. Check both Homebrew locations
+-- and the official installer's default; fall back to PATH for other installs.
+local herdr = 'herdr'
+for _, path in ipairs {
+  '/opt/homebrew/bin/herdr',
+  '/usr/local/bin/herdr',
+  wezterm.home_dir .. '/.local/bin/herdr',
+} do
+  local file = io.open(path, 'r')
+  if file then
+    file:close()
+    herdr = path
+    break
+  end
+end
+config.default_prog = { herdr }
 
 -- Silent: no bell sound anywhere. Bells otherwise go unnoticed: agent alerts
 -- come from Herdr instead, which posts macOS notifications when an agent
